@@ -66,24 +66,32 @@ defmodule Server.Queue do
         })
         |> Repo.insert()
 
-      Enum.with_index(chunks, fn chunk, idx ->
-        chunk_id = "#{batch_id}_chunk_#{idx}"
+      # Build all chunk Oban jobs as changesets and insert them in one
+      # multi-VALUES INSERT. With ~1000+ chunks, the previous one-job-
+      # per-Oban.insert approach took >15s of round-trips against
+      # Neon and timed out the DB connection on large submissions.
+      params = Map.drop(payload, ["candidates", "chunk_size", "name"])
 
-        args = %{
-          "chunk_id" => chunk_id,
-          "batch_id" => batch_id,
-          "chunk_index" => idx,
-          "cmd" => batch.cmd,
-          "env_name" => batch.env_name,
-          "candidates" => chunk,
-          "params" => Map.drop(payload, ["candidates", "chunk_size", "name"])
-        }
+      job_changesets =
+        Enum.with_index(chunks, fn chunk, idx ->
+          chunk_id = "#{batch_id}_chunk_#{idx}"
 
-        {:ok, _job} =
-          args
-          |> BrokerWorker.new(meta: %{"chunk_id" => chunk_id, "batch_id" => batch_id})
-          |> Oban.insert()
-      end)
+          args = %{
+            "chunk_id" => chunk_id,
+            "batch_id" => batch_id,
+            "chunk_index" => idx,
+            "cmd" => batch.cmd,
+            "env_name" => batch.env_name,
+            "candidates" => chunk,
+            "params" => params
+          }
+
+          BrokerWorker.new(args, meta: %{"chunk_id" => chunk_id, "batch_id" => batch_id})
+        end)
+
+      if total_chunks > 0 do
+        {_count, _jobs} = Oban.insert_all(job_changesets)
+      end
 
       if total_chunks == 0 do
         Repo.update!(Batch.changeset(batch, %{completed_at: DateTime.utc_now()}))
