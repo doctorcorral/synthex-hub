@@ -165,28 +165,15 @@ defmodule Server.Router do
     end
   end
 
+  # Default: a SLIM response with progress and reward summary only.
+  # `?include_results=1` opts into the heavy `results` array — the
+  # master fetches that exactly once on completion, so we don't
+  # restream multi-MB of accumulated chunk payloads on every poll.
   get "/api/master/batches/:batch_id" do
-    case Server.Queue.get_batch(batch_id) do
-      {:ok, batch} ->
-        send_json(conn, 200, %{
-          batch_id: batch.id,
-          name: batch.name,
-          env_name: batch.env_name,
-          status: batch.status,
-          total_chunks: batch.total_chunks,
-          completed_chunks: batch.completed_chunks,
-          progress:
-            if(batch.total_chunks > 0,
-              do: batch.completed_chunks / batch.total_chunks,
-              else: 1.0
-            ),
-          results: batch.results,
-          inserted_at: batch.inserted_at,
-          completed_at: batch.completed_at
-        })
-
-      {:error, :not_found} ->
-        send_json(conn, 404, %{error: "batch_not_found"})
+    if include_results?(conn.params["include_results"]) do
+      send_full_batch(conn, batch_id)
+    else
+      send_batch_progress(conn, batch_id)
     end
   end
 
@@ -219,6 +206,70 @@ defmodule Server.Router do
   end
 
   # ── Helpers ─────────────────────────────────────────────────
+
+  defp include_results?(value) do
+    case value do
+      "1" -> true
+      "true" -> true
+      "TRUE" -> true
+      _ -> false
+    end
+  end
+
+  defp send_batch_progress(conn, batch_id) do
+    case Server.Queue.get_batch_progress(batch_id) do
+      {:ok, row} ->
+        send_json(conn, 200, %{
+          batch_id: row.id,
+          name: row.name,
+          env_name: row.env_name,
+          cmd: row.cmd,
+          status: row.status,
+          total_chunks: row.total_chunks,
+          completed_chunks: row.completed_chunks,
+          progress:
+            if(row.total_chunks > 0,
+              do: row.completed_chunks / row.total_chunks,
+              else: 1.0
+            ),
+          best_reward: row.best_reward,
+          baseline_reward: row.baseline_reward,
+          inserted_at: row.inserted_at,
+          completed_at: row.completed_at
+        })
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "batch_not_found"})
+    end
+  end
+
+  defp send_full_batch(conn, batch_id) do
+    case Server.Queue.get_batch(batch_id) do
+      {:ok, batch} ->
+        send_json(conn, 200, %{
+          batch_id: batch.id,
+          name: batch.name,
+          env_name: batch.env_name,
+          cmd: batch.cmd,
+          status: batch.status,
+          total_chunks: batch.total_chunks,
+          completed_chunks: batch.completed_chunks,
+          progress:
+            if(batch.total_chunks > 0,
+              do: batch.completed_chunks / batch.total_chunks,
+              else: 1.0
+            ),
+          best_reward: batch.best_reward,
+          baseline_reward: batch.baseline_reward,
+          results: batch.results,
+          inserted_at: batch.inserted_at,
+          completed_at: batch.completed_at
+        })
+
+      {:error, :not_found} ->
+        send_json(conn, 404, %{error: "batch_not_found"})
+    end
+  end
 
   defp serve_static(conn, filename, content_type) do
     path = Path.join(:code.priv_dir(:server) |> to_string(), Path.join("static", filename))

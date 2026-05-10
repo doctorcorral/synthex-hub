@@ -116,6 +116,37 @@ defmodule Server.Queue do
     end
   end
 
+  @doc """
+  Lightweight batch progress lookup — selects only small columns,
+  never the (potentially many-MB) `results` jsonb-array. Used by
+  master polling to avoid streaming every accumulated chunk's
+  payload back across the wire on every poll.
+  """
+  def get_batch_progress(batch_id) do
+    query =
+      from(b in Batch,
+        where: b.id == ^batch_id,
+        select: %{
+          id: b.id,
+          name: b.name,
+          env_name: b.env_name,
+          cmd: b.cmd,
+          status: b.status,
+          total_chunks: b.total_chunks,
+          completed_chunks: b.completed_chunks,
+          best_reward: b.best_reward,
+          baseline_reward: b.baseline_reward,
+          inserted_at: b.inserted_at,
+          completed_at: b.completed_at
+        }
+      )
+
+    case Repo.one(query) do
+      nil -> {:error, :not_found}
+      row -> {:ok, row}
+    end
+  end
+
   @doc "List recent batches, newest first."
   def list_batches(limit \\ 50) do
     Batch

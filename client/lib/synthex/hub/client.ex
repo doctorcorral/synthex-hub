@@ -199,7 +199,15 @@ defmodule Synthex.Hub.Client do
     end
   end
 
-  @doc "Block until the batch completes. Returns `{:ok, results}`."
+  @doc """
+  Block until the batch completes. Returns `{:ok, results}`.
+
+  Polls a SLIM status endpoint (no `results` array) so a multi-hour
+  run doesn't restream the same accumulated chunk payloads back to
+  the master on every 5-second tick. When the status flips to
+  `completed`, makes one final request with `?include_results=1`
+  to actually fetch the chunk results.
+  """
   def await_batch(%__MODULE__{} = client, batch_id) do
     deadline = System.monotonic_time(:millisecond) + client.max_wait_ms
     poll_loop(client, batch_id, deadline, _last_progress = -1)
@@ -209,9 +217,14 @@ defmodule Synthex.Hub.Client do
     if System.monotonic_time(:millisecond) > deadline do
       {:error, "max_wait_ms exceeded for batch #{batch_id}"}
     else
-      case fetch_batch(client, batch_id) do
-        {:ok, %{"status" => "completed", "results" => results}} ->
-          {:ok, results || []}
+      case fetch_batch(client, batch_id, include_results: false) do
+        {:ok, %{"status" => "completed"}} ->
+          # One heavy fetch, only once: pull the full results.
+          case fetch_batch(client, batch_id, include_results: true) do
+            {:ok, %{"results" => results}} -> {:ok, results || []}
+            {:ok, _} -> {:ok, []}
+            {:error, reason} -> {:error, "completed but failed to fetch results: #{reason}"}
+          end
 
         {:ok, %{"status" => "failed"} = body} ->
           {:error, "batch #{batch_id} failed: #{inspect(body)}"}
@@ -240,8 +253,10 @@ defmodule Synthex.Hub.Client do
     end
   end
 
-  defp fetch_batch(%__MODULE__{} = client, batch_id) do
-    case Req.get(url(client, "/master/batches/#{batch_id}"),
+  defp fetch_batch(%__MODULE__{} = client, batch_id, opts) do
+    qs = if Keyword.get(opts, :include_results, false), do: "?include_results=1", else: ""
+
+    case Req.get(url(client, "/master/batches/#{batch_id}#{qs}"),
            headers: auth_headers(client),
            receive_timeout: client.request_timeout_ms,
            retry: false
