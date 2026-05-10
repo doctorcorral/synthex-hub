@@ -46,6 +46,30 @@ defmodule Server.Router do
     |> send_json(200, Server.Queue.public_status())
   end
 
+  # All-time top contributors. Anonymous workers (`name == "anonymous"`)
+  # collapse into a single bucket. Cached briefly so the landing page
+  # can poll without hammering Postgres.
+  get "/api/public-status/leaderboard" do
+    limit = parse_limit(conn.params["limit"], default: 20, max: 100)
+
+    conn
+    |> put_resp_header("cache-control", "public, max-age=15")
+    |> send_json(200, %{contributors: Server.Queue.leaderboard(limit: limit)})
+  end
+
+  # Per-experiment contributors. Public so a master can share a batch_id
+  # link with their friends and they can see who-did-what.
+  get "/api/public-status/batches/:batch_id/contributors" do
+    limit = parse_limit(conn.params["limit"], default: 50, max: 500)
+
+    conn
+    |> put_resp_header("cache-control", "public, max-age=15")
+    |> send_json(200, %{
+      batch_id: batch_id,
+      contributors: Server.Queue.batch_contributors(batch_id, limit: limit)
+    })
+  end
+
   get "/api/status" do
     send_json(conn, 200, Server.Queue.status())
   end
@@ -192,6 +216,16 @@ defmodule Server.Router do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(status, Jason.encode!(body))
+  end
+
+  defp parse_limit(value, opts) do
+    default = Keyword.fetch!(opts, :default)
+    max = Keyword.fetch!(opts, :max)
+
+    case value && Integer.parse(value) do
+      {n, _} when n > 0 and n <= max -> n
+      _ -> default
+    end
   end
 
   defp format_errors(changeset) do

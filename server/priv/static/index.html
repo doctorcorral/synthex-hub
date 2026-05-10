@@ -151,6 +151,59 @@
       color: var(--fg);
       margin: 8px 0 16px;
     }
+
+    /* Leaderboard table */
+    .lb {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin: 12px 0 24px;
+    }
+    .lb thead th {
+      text-align: left;
+      font-weight: 500;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--fg-faint);
+      padding: 10px 14px;
+      background: var(--bg-elev-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .lb tbody td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .lb tbody tr:last-child td { border-bottom: none; }
+    .lb td.rank {
+      width: 36px; color: var(--fg-faint);
+      font-variant-numeric: tabular-nums;
+    }
+    .lb td.name { color: var(--fg); font-weight: 500; }
+    .lb td.name.anon { color: var(--fg-dim); font-style: italic; font-weight: 400; }
+    .lb td.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--fg-dim);
+    }
+    .lb td.num.highlight { color: var(--fg); }
+    .lb-empty {
+      color: var(--fg-faint);
+      font-size: 13px;
+      padding: 14px;
+      text-align: center;
+      font-style: italic;
+    }
+    .lb-medal {
+      display: inline-block;
+      width: 18px; text-align: center;
+      margin-right: 4px;
+    }
     code.inline {
       background: var(--bg-elev-2);
       border: 1px solid var(--border);
@@ -220,6 +273,31 @@
       <div><div class="stat-num" id="s-jobs">·</div><div class="stat-label">candidates evaluated</div></div>
       <div><div class="stat-num" id="s-batches">·</div><div class="stat-label">experiments completed</div></div>
     </div>
+
+    <h2>Top contributors <span style="font-weight:400;color:var(--fg-faint);font-size:13px;">(all-time)</span></h2>
+
+    <p style="margin-top:0">
+      Workers that pick a name show up here. Choose any handle at install
+      time, or type <code class="inline">anonymous</code> to pool credit
+      with the rest. Aggregated by display name, so a single human running
+      multiple machines under <code class="inline">alice</code> shows up
+      as one row.
+    </p>
+
+    <table class="lb" aria-label="contributors leaderboard">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>contributor</th>
+          <th style="text-align:right">candidates</th>
+          <th style="text-align:right">chunks</th>
+          <th style="text-align:right">experiments</th>
+        </tr>
+      </thead>
+      <tbody id="leaderboard">
+        <tr><td colspan="5" class="lb-empty">loading…</td></tr>
+      </tbody>
+    </table>
 
     <h2>What is this thing?</h2>
 
@@ -333,15 +411,62 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       return Number(n).toLocaleString();
     }
 
-    fetch('/api/public-status')
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(s => {
-        document.getElementById('s-workers').textContent  = fmt(s.active_workers);
-        document.getElementById('s-cores').textContent    = fmt(s.total_cores);
-        document.getElementById('s-jobs').textContent     = fmt(s.candidates_evaluated);
-        document.getElementById('s-batches').textContent  = fmt(s.experiments_completed);
-      })
-      .catch(() => { /* offline / unreachable; leave dots */ });
+    function refreshStatus() {
+      fetch('/api/public-status')
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(s => {
+          document.getElementById('s-workers').textContent  = fmt(s.active_workers);
+          document.getElementById('s-cores').textContent    = fmt(s.total_cores);
+          document.getElementById('s-jobs').textContent     = fmt(s.candidates_evaluated);
+          document.getElementById('s-batches').textContent  = fmt(s.experiments_completed);
+        })
+        .catch(() => { /* offline / unreachable; leave dots */ });
+    }
+
+    function renderLeaderboard(rows) {
+      const tbody = document.getElementById('leaderboard');
+      if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="lb-empty">no contributions yet — be the first!</td></tr>';
+        return;
+      }
+      const medals = { 0: '🥇', 1: '🥈', 2: '🥉' };
+      tbody.innerHTML = rows.map((r, i) => {
+        const isAnon = r.name === 'anonymous';
+        const nameClass = isAnon ? 'name anon' : 'name';
+        const medal = medals[i] || '';
+        return (
+          '<tr>' +
+            '<td class="rank">' + (medal ? '<span class="lb-medal">' + medal + '</span>' : (i + 1)) + '</td>' +
+            '<td class="' + nameClass + '">' + escapeHtml(r.name) + '</td>' +
+            '<td class="num highlight">' + fmt(r.candidates_evaluated) + '</td>' +
+            '<td class="num">' + fmt(r.chunks_completed) + '</td>' +
+            '<td class="num">' + fmt(r.experiments_contributed) + '</td>' +
+          '</tr>'
+        );
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function refreshLeaderboard() {
+      fetch('/api/public-status/leaderboard?limit=10')
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(d => renderLeaderboard(d.contributors))
+        .catch(() => {
+          document.getElementById('leaderboard').innerHTML =
+            '<tr><td colspan="5" class="lb-empty">leaderboard unavailable</td></tr>';
+        });
+    }
+
+    refreshStatus();
+    refreshLeaderboard();
+    setInterval(refreshStatus, 15000);
+    setInterval(refreshLeaderboard, 30000);
   </script>
 </body>
 </html>

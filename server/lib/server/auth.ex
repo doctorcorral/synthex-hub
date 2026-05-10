@@ -37,7 +37,8 @@ defmodule Server.Auth do
   import Plug.Conn
 
   # Routes that need no auth ever — landing page, installer, health
-  # checks, the aggregate counter that drives the landing page.
+  # checks, anything under the public-status namespace (cluster
+  # counters, leaderboards, per-batch contributor breakdowns).
   @public_paths ~w(
     /
     /health
@@ -46,12 +47,13 @@ defmodule Server.Auth do
     /index.html
     /favicon.ico
     /robots.txt
-    /api/public-status
   )
 
-  # Anyone with the URL can run a worker. We don't trust unknown
-  # workers' results blindly — that's an experiment-design problem,
-  # not an HTTP-auth problem.
+  # Prefixes that are unconditionally open. `/api/public-status` covers
+  # the bare counter endpoint AND the nested leaderboard/contributor
+  # endpoints under it. Worker endpoints are open so friends can donate
+  # compute without being authenticated.
+  @public_prefixes ["/api/public-status"]
   @worker_prefix "/api/worker"
 
   def init(opts), do: opts
@@ -59,6 +61,9 @@ defmodule Server.Auth do
   def call(%Plug.Conn{request_path: path} = conn, _opts) do
     cond do
       path in @public_paths ->
+        conn
+
+      Enum.any?(@public_prefixes, &String.starts_with?(path, &1)) ->
         conn
 
       String.starts_with?(path, @worker_prefix) ->

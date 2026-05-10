@@ -32,7 +32,7 @@ defmodule Server.Queue do
   """
 
   import Ecto.Query
-  alias Server.{Batch, Repo, BrokerWorker, WorkerNode}
+  alias Server.{Batch, BatchContribution, Repo, BrokerWorker, WorkerNode}
 
   @default_chunk_size 100
 
@@ -208,11 +208,48 @@ defmodule Server.Queue do
           if worker_id do
             from(w in WorkerNode, where: w.id == ^worker_id)
             |> Repo.update_all(inc: [jobs_completed: 1, candidates_evaluated: length(results)])
+
+            record_contribution(batch_id, worker_id, results, now)
           end
 
           :ok
       end
     end)
+  end
+
+  # Upsert one row per (batch_id, worker_id). On first chunk: create
+  # with counters = 1 / length(results). On subsequent chunks for the
+  # same pair: increment counters and bump last_chunk_at. We always
+  # refresh `display_name` from WorkerNode so renames take effect on
+  # the next chunk.
+  defp record_contribution(batch_id, worker_id, results, now) do
+    display_name = lookup_display_name(worker_id)
+    n = length(results)
+
+    %BatchContribution{}
+    |> BatchContribution.changeset(%{
+      batch_id: batch_id,
+      worker_id: worker_id,
+      display_name: display_name,
+      chunks_completed: 1,
+      candidates_evaluated: n,
+      first_chunk_at: now,
+      last_chunk_at: now
+    })
+    |> Repo.insert(
+      on_conflict: [
+        inc: [chunks_completed: 1, candidates_evaluated: n],
+        set: [last_chunk_at: now, display_name: display_name]
+      ],
+      conflict_target: [:batch_id, :worker_id]
+    )
+  end
+
+  defp lookup_display_name(worker_id) do
+    case Repo.get(WorkerNode, worker_id) do
+      %WorkerNode{name: name} when is_binary(name) and byte_size(name) > 0 -> name
+      _ -> "anonymous"
+    end
   end
 
   # ── Worker registration ─────────────────────────────────────
@@ -318,6 +355,56 @@ defmodule Server.Queue do
   # jobs. Incremented by length(results) on every chunk submission.
   defp candidates_evaluated do
     Repo.aggregate(WorkerNode, :sum, :candidates_evaluated) || 0
+  end
+
+  # ── Leaderboard ─────────────────────────────────────────────
+
+  @doc """
+  All-time top contributors, grouped by `display_name`. All
+  workers whose name is `"anonymous"` collapse into a single row.
+  Returns `[%{name, candidates_evaluated, chunks_completed,
+  experiments_contributed, last_seen_at}, ...]`.
+  """
+  def leaderboard(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 20)
+
+    from(c in BatchContribution,
+      group_by: c.display_name,
+      select: %{
+        name: c.display_name,
+        candidates_evaluated: sum(c.candidates_evaluated),
+        chunks_completed: sum(c.chunks_completed),
+        experiments_contributed: count(c.batch_id, :distinct),
+        last_seen_at: max(c.last_chunk_at)
+      },
+      order_by: [desc: sum(c.candidates_evaluated)],
+      limit: ^limit
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Per-batch contributors, grouped by `display_name`. Useful for
+  showing "who helped run THIS experiment" once a batch is in flight
+  or completed.
+  """
+  def batch_contributors(batch_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 50)
+
+    from(c in BatchContribution,
+      where: c.batch_id == ^batch_id,
+      group_by: c.display_name,
+      select: %{
+        name: c.display_name,
+        candidates_evaluated: sum(c.candidates_evaluated),
+        chunks_completed: sum(c.chunks_completed),
+        first_chunk_at: min(c.first_chunk_at),
+        last_chunk_at: max(c.last_chunk_at)
+      },
+      order_by: [desc: sum(c.candidates_evaluated)],
+      limit: ^limit
+    )
+    |> Repo.all()
   end
 
   # ── Internals ───────────────────────────────────────────────

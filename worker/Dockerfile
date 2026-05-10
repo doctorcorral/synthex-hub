@@ -28,6 +28,7 @@ RUN mix deps.get --only prod && mix deps.compile
 
 COPY lib ./lib
 COPY environments ./environments
+COPY scripts ./scripts
 RUN mix compile
 
 # Configurable at `docker run`:
@@ -35,7 +36,14 @@ RUN mix compile
 #   API_TOKEN     OPTIONAL — only set if the hub authenticates workers.
 #                 Most public hubs leave workers anonymous.
 #   POOL_SIZE     defaults to System.schedulers_online()
-#   WORKER_NAME   stable identifier across restarts (e.g. "alice-mac")
+#   WORKER_NAME   display name on the public leaderboard. Set to
+#                 "anonymous" (or leave empty) to opt out of recognition.
+#   WORKER_ID     stable internal UUID. Auto-generated and persisted
+#                 to /var/synthex/worker_id on first start; mount
+#                 a Docker volume there to survive container removal.
 ENV SERVER_URL="http://host.docker.internal:4000/api"
 
+VOLUME ["/var/synthex"]
+
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 CMD ["mix", "run", "--no-halt"]

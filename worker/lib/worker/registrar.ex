@@ -52,7 +52,7 @@ defmodule Worker.Registrar do
   defp do_register do
     payload = %{
       id: worker_id(),
-      name: Application.get_env(:worker, :worker_id),
+      name: display_name(),
       hostname: Application.get_env(:worker, :hostname),
       pool_size: Application.get_env(:worker, :pool_size, 1),
       version: Application.spec(:worker, :vsn) |> to_string(),
@@ -64,7 +64,10 @@ defmodule Worker.Registrar do
 
     case Worker.HttpClient.post("/worker/register", payload) do
       {:ok, %{status: status}} when status in [200, 201] ->
-        Logger.info("[Registrar] registered as #{worker_id()}")
+        Logger.info(
+          "[Registrar] registered worker_id=#{worker_id()} display_name=#{display_name()}"
+        )
+
         :ok
 
       other ->
@@ -74,4 +77,5 @@ defmodule Worker.Registrar do
   end
 
   defp worker_id, do: Application.get_env(:worker, :worker_id)
+  defp display_name, do: Application.get_env(:worker, :display_name, "anonymous")
 end

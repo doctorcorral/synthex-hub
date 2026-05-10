@@ -16,11 +16,20 @@
 #
 # Optional env:
 #     SERVER_URL         default: https://synthex.fit/api
-#     WORKER_NAME        default: $(hostname)
+#     WORKER_NAME        display name on the public leaderboard.
+#                        default: prompted (suggesting $USER@$(hostname));
+#                        type "anonymous" or leave blank to opt out
+#                        of recognition.
 #     POOL_SIZE          default: number of CPU cores
 #     CONTAINER_NAME     default: synthex-worker
+#     VOLUME_NAME        named docker volume that persists the stable
+#                        worker_id (UUID) across restarts so per-worker
+#                        contribution credit doesn't reset.
+#                        default: synthex-worker-data
 #     API_TOKEN          only set if running against a hub that
 #                        explicitly authenticates workers.
+#     NONINTERACTIVE     skip the WORKER_NAME prompt entirely (handy
+#                        for ssh + here-doc, CI, etc).
 #
 #     # Build mode (default):
 #     BUILD_FROM         git URL + ref + subdir for the build context.
@@ -110,9 +119,27 @@ banner
 need_docker
 
 SERVER_URL="${SERVER_URL:-https://synthex.fit/api}"
-WORKER_NAME="${WORKER_NAME:-$(hostname 2>/dev/null || echo worker-$$)}"
 POOL_SIZE="${POOL_SIZE:-$(detect_cores)}"
 CONTAINER_NAME="${CONTAINER_NAME:-synthex-worker}"
+VOLUME_NAME="${VOLUME_NAME:-synthex-worker-data}"
+
+# Prompt for a display name unless one was passed via env / NONINTERACTIVE
+# is set. The default suggestion is $USER@$(hostname); an empty answer
+# means "anonymous" (your contributions still count, but won't show
+# up under your name on the leaderboard).
+suggested_name="$(printf '%s@%s' "${USER:-anon}" "$(hostname 2>/dev/null | cut -d. -f1)")"
+
+if [ -z "${WORKER_NAME:-}" ] && [ -z "${NONINTERACTIVE:-}" ] && [ -t 0 ]; then
+  printf '\n%sChoose a display name for the public leaderboard.%s\n' "$C_BOLD" "$C_RESET" >&2
+  printf '%s  · type a handle (e.g. "alice", "bob@univ")%s\n' "$C_DIM" "$C_RESET" >&2
+  printf '%s  · press ENTER to use the suggested default%s\n' "$C_DIM" "$C_RESET" >&2
+  printf '%s  · type "anonymous" to opt out of recognition%s\n' "$C_DIM" "$C_RESET" >&2
+  printf '\n  display name [%s%s%s]: ' "$C_BOLD" "$suggested_name" "$C_RESET" >&2
+  read -r entered_name </dev/tty || entered_name=""
+  WORKER_NAME="${entered_name:-$suggested_name}"
+fi
+# Final fallback for non-interactive cases.
+WORKER_NAME="${WORKER_NAME:-anonymous}"
 
 # Image acquisition mode: explicit IMAGE wins (registry pull); otherwise
 # we build from the git URL. This keeps the default frictionless — the
@@ -130,8 +157,14 @@ fi
 
 hr
 printf '  %sserver%s     %s\n' "$C_DIM" "$C_RESET" "$SERVER_URL"
-printf '  %sname%s       %s\n' "$C_DIM" "$C_RESET" "$WORKER_NAME"
+printf '  %sname%s       %s' "$C_DIM" "$C_RESET" "$WORKER_NAME"
+if [ "$WORKER_NAME" = "anonymous" ]; then
+  printf ' %s(opted out of recognition)%s' "$C_DIM" "$C_RESET"
+fi
+printf '\n'
 printf '  %spool size%s  %s python interpreters\n' "$C_DIM" "$C_RESET" "$POOL_SIZE"
+printf '  %sid volume%s  %s %s(persists worker_id across restarts)%s\n' \
+  "$C_DIM" "$C_RESET" "$VOLUME_NAME" "$C_DIM" "$C_RESET"
 if [ "$ACQUIRE_MODE" = pull ]; then
   printf '  %simage%s      %s %s(pulled from registry)%s\n' \
     "$C_DIM" "$C_RESET" "$RUN_IMAGE" "$C_DIM" "$C_RESET"
@@ -191,11 +224,19 @@ if [ -n "${API_TOKEN:-}" ]; then
   DOCKER_ENV_FLAGS="$DOCKER_ENV_FLAGS -e API_TOKEN=$API_TOKEN"
 fi
 
+# Make sure the named volume exists. Mounting it at /var/synthex
+# inside the container persists worker_id across container removal,
+# image rebuilds, and machine restarts — so contribution credit
+# accumulates against ONE identity instead of fragmenting per
+# container instance.
+docker volume create "$VOLUME_NAME" >/dev/null
+
 # shellcheck disable=SC2086
 CONTAINER_ID=$(
   docker run -d \
     --name "$CONTAINER_NAME" \
     --restart unless-stopped \
+    -v "$VOLUME_NAME":/var/synthex \
     $DOCKER_ENV_FLAGS \
     "$RUN_IMAGE"
 )
