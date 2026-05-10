@@ -126,19 +126,26 @@ Worker.Supervisor (rest_for_one)
 
 ## Donating compute (Docker)
 
+The friction-free path is the [public installer](https://synthex.fit/install):
+
+```bash
+curl -fsSL https://synthex.fit/install | sh
+```
+
+If you'd rather invoke Docker yourself:
+
 ```bash
 docker run --rm \
   -e SERVER_URL=https://synthex.fit/api \
-  -e API_TOKEN=<paste token from rcc>   \
   -e WORKER_NAME=$(hostname)            \
   -e POOL_SIZE=8                        \
-  rcc/synthex-worker:latest
+  doctorcorral/synthex-worker:latest
 ```
 
-Or persistent:
+No token required — workers are anonymous. Or persistent:
 
 ```bash
-SERVER_URL=https://synthex.fit/api API_TOKEN=... docker compose up -d
+SERVER_URL=https://synthex.fit/api docker compose up -d
 ```
 
 When you stop the worker, Broadway gracefully drains in-flight
@@ -150,7 +157,7 @@ Lifeline and reassigned to another worker.
 
 ```bash
 cd environments/gymnasium && pip install -r requirements.txt && cd ../..
-SERVER_URL=http://localhost:4000/api API_TOKEN=<token> POOL_SIZE=4 \
+SERVER_URL=http://localhost:4000/api POOL_SIZE=4 \
   WORKER_NAME=$(hostname)-dev mix run --no-halt
 ```
 
@@ -159,7 +166,7 @@ SERVER_URL=http://localhost:4000/api API_TOKEN=<token> POOL_SIZE=4 \
 | Variable                | Default                                     | Notes                                                |
 |-------------------------|---------------------------------------------|------------------------------------------------------|
 | `SERVER_URL`            | `http://localhost:4000/api`                 | Trailing `/api` is required.                         |
-| `API_TOKEN`             | (unset)                                     | Required when the hub is configured with a token.    |
+| `API_TOKEN`             | (unset)                                     | Optional. Workers are anonymous on public hubs; only set if your hub requires worker auth. |
 | `POOL_SIZE`             | `System.schedulers_online()`                | One Python interpreter per pool slot.                |
 | `WORKER_NAME`           | `<hostname>-<unix-time>`                    | Stable across restarts is better.                    |
 | `HOSTNAME`              | `:inet.gethostname()`                       | Reported in `/api/status`.                           |

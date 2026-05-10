@@ -19,12 +19,12 @@ Got Docker and a few free cores? Help us tackle MuJoCo Humanoid:
 curl -fsSL https://synthex.fit/install | sh
 ```
 
-You'll be prompted for the API token (ask the operator). The script
-will:
+No token, no signup. Workers are anonymous; only batch
+*submission* is authenticated. The script will:
 
 1. verify Docker is installed and running,
 2. build the worker image directly from
-   `https://github.com/rcc/synthex-hub` using Docker's remote-build
+   `https://github.com/doctorcorral/synthex-hub` using Docker's remote-build
    feature (`docker build https://….git#main:worker`) — no clone,
    no registry login, no separate publishing step,
 3. start a worker bound to `https://synthex.fit/api` with one Python
@@ -47,7 +47,7 @@ BUILD_FROM=https://github.com/myfork/synthex-hub.git#feature:worker \
 
 # Or skip the build and use a pre-baked registry image
 # (for operators who want to publish; see deploy/publish-worker.sh):
-IMAGE=ghcr.io/rcc/synthex-worker:latest \
+IMAGE=ghcr.io/doctorcorral/synthex-worker:latest \
   sh -c "$(curl -fsSL https://synthex.fit/install)"
 ```
 
@@ -100,8 +100,13 @@ served by the hub itself; the installer is at
   tracks per-chunk completion and submits results back to the hub
   once all candidates of a chunk report. Backpressure, telemetry,
   graceful shutdown, and per-port crash isolation come for free.
-* **Auth** is a single shared Bearer token (`API_TOKEN`). The server
-  refuses unauthenticated calls when a token is configured.
+* **Auth** is master-only. `/api/master/*` (batch submission, batch
+  reads) and `/api/status` require a Bearer token (`API_TOKEN`);
+  `/api/worker/*` is open so anyone can donate compute. Result
+  poisoning is mitigated at the *experiment* layer (multi-worker
+  consensus, outlier detection on reward distributions) rather than
+  at HTTP. See [`server/lib/server/auth.ex`](server/lib/server/auth.ex)
+  for the full route table.
 
 ## End-to-end quickstart (local)
 

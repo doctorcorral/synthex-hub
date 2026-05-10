@@ -32,7 +32,8 @@ RUN mix compile
 
 # Configurable at `docker run`:
 #   SERVER_URL    e.g. https://synthex.fit/api
-#   API_TOKEN     shared bearer token (REQUIRED in production)
+#   API_TOKEN     OPTIONAL — only set if the hub authenticates workers.
+#                 Most public hubs leave workers anonymous.
 #   POOL_SIZE     defaults to System.schedulers_online()
 #   WORKER_NAME   stable identifier across restarts (e.g. "alice-mac")
 ENV SERVER_URL="http://host.docker.internal:4000/api"

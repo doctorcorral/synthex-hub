@@ -28,11 +28,15 @@ defmodule Server.Application do
   defp log_auth_status do
     case Application.get_env(:server, :api_token) do
       token when is_binary(token) and byte_size(token) > 0 ->
-        Logger.info("API auth: enabled (Bearer token, #{byte_size(token)} bytes)")
+        Logger.info(
+          "API auth: master-only (Bearer token, #{byte_size(token)} bytes). " <>
+            "/api/worker/* and /api/public-status are open; /api/master/* and /api/status require the token."
+        )
 
       _ ->
         Logger.warning(
-          "API auth: DISABLED (no API_TOKEN set). Do not expose this server to the internet."
+          "API auth: fully open (no API_TOKEN set). Anyone can submit batches. " <>
+            "Set fly secrets set API_TOKEN=… for production."
         )
     end
   end

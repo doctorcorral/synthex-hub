@@ -11,24 +11,26 @@
 # GitHub repo — no registry, no `git clone`, no `docker login`. Docker
 # fetches the source, builds, runs.
 #
-# Required env (or you'll be prompted):
-#     API_TOKEN          shared bearer token (ask the operator)
+# No token required: workers connect anonymously. Only batch
+# submission (the master) is authenticated.
 #
 # Optional env:
 #     SERVER_URL         default: https://synthex.fit/api
 #     WORKER_NAME        default: $(hostname)
 #     POOL_SIZE          default: number of CPU cores
 #     CONTAINER_NAME     default: synthex-worker
+#     API_TOKEN          only set if running against a hub that
+#                        explicitly authenticates workers.
 #
 #     # Build mode (default):
 #     BUILD_FROM         git URL + ref + subdir for the build context.
-#                        default: https://github.com/rcc/synthex-hub.git#main:worker
+#                        default: https://github.com/doctorcorral/synthex-hub.git#main:worker
 #     LOCAL_TAG          local tag for the built image.
 #                        default: synthex-worker:local
 #
 #     # Pull mode (override):
 #     IMAGE              if set, skip the build step and `docker pull`
-#                        this image instead. e.g. ghcr.io/rcc/synthex-worker:latest
+#                        this image instead. e.g. ghcr.io/doctorcorral/synthex-worker:latest
 #
 set -eu
 
@@ -103,23 +105,6 @@ detect_cores() {
   fi
 }
 
-prompt_token() {
-  if [ -n "${API_TOKEN:-}" ]; then
-    return 0
-  fi
-  if [ ! -t 0 ]; then
-    die "API_TOKEN not set and stdin is not a TTY. Re-run with: API_TOKEN=… sh -c \"\$(curl -fsSL https://synthex.fit/install)\""
-  fi
-  printf '%sAPI token (ask the operator):%s ' "$C_BOLD" "$C_RESET" >&2
-  # Best-effort silent read; fall back to plain read for /bin/sh.
-  if read -rs API_TOKEN 2>/dev/null; then
-    printf '\n' >&2
-  else
-    read -r API_TOKEN
-  fi
-  [ -n "$API_TOKEN" ] || die "no token provided."
-}
-
 # ── main ────────────────────────────────────────────────────
 banner
 need_docker
@@ -132,7 +117,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-synthex-worker}"
 # Image acquisition mode: explicit IMAGE wins (registry pull); otherwise
 # we build from the git URL. This keeps the default frictionless — the
 # operator never has to publish anywhere.
-BUILD_FROM="${BUILD_FROM:-https://github.com/rcc/synthex-hub.git#main:worker}"
+BUILD_FROM="${BUILD_FROM:-https://github.com/doctorcorral/synthex-hub.git#main:worker}"
 LOCAL_TAG="${LOCAL_TAG:-synthex-worker:local}"
 
 if [ -n "${IMAGE:-}" ]; then
@@ -142,8 +127,6 @@ else
   ACQUIRE_MODE=build
   RUN_IMAGE="$LOCAL_TAG"
 fi
-
-prompt_token
 
 hr
 printf '  %sserver%s     %s\n' "$C_DIM" "$C_RESET" "$SERVER_URL"
@@ -200,14 +183,20 @@ fi
 
 # Launch.
 say "Starting worker…"
+
+# Build the env-flag list. API_TOKEN is only forwarded if explicitly
+# set — anonymous workers are first-class.
+DOCKER_ENV_FLAGS="-e SERVER_URL=$SERVER_URL -e WORKER_NAME=$WORKER_NAME -e POOL_SIZE=$POOL_SIZE"
+if [ -n "${API_TOKEN:-}" ]; then
+  DOCKER_ENV_FLAGS="$DOCKER_ENV_FLAGS -e API_TOKEN=$API_TOKEN"
+fi
+
+# shellcheck disable=SC2086
 CONTAINER_ID=$(
   docker run -d \
     --name "$CONTAINER_NAME" \
     --restart unless-stopped \
-    -e SERVER_URL="$SERVER_URL" \
-    -e API_TOKEN="$API_TOKEN" \
-    -e WORKER_NAME="$WORKER_NAME" \
-    -e POOL_SIZE="$POOL_SIZE" \
+    $DOCKER_ENV_FLAGS \
     "$RUN_IMAGE"
 )
 

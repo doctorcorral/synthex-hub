@@ -202,14 +202,15 @@
       <div class="install-foot">
         Requires Docker. Tested on macOS (Apple Silicon &amp; Intel) and Linux.
         Builds the worker image directly from the
-        <a href="https://github.com/rcc/synthex-hub">public repo</a>
+        <a href="https://github.com/doctorcorral/synthex-hub">public repo</a>
         (no registry login, no <code>git clone</code>) and runs one
         Python port per CPU core. First build ~3–5 min; subsequent
         re-runs reuse the layer cache.
       </div>
     </div>
 
-    <p>You'll be prompted for the API token — ping rcc for it.</p>
+    <p>No token, no signup, no questions asked. Workers are
+    anonymous; results are reconciled at the experiment layer.</p>
 
     <h2>Live cluster</h2>
 
@@ -243,9 +244,8 @@
     <ul>
       <li>verify Docker is installed (and tell you where to get it
         if not),</li>
-      <li>prompt for the API token,</li>
       <li>build the worker image directly from
-        <code class="inline">github.com/rcc/synthex-hub</code> using
+        <code class="inline">github.com/doctorcorral/synthex-hub</code> using
         Docker's remote-build feature
         (<code class="inline">docker build https://&hellip;.git#main:worker</code>) —
         no registry, no clone,</li>
@@ -270,10 +270,10 @@ docker rm   synthex-worker</code></pre>
     <p>
       Workers donate compute; <em>masters</em> drive the synthesis
       loop. Today that lives in the
-      <a href="https://github.com/rcc/synthex">synthex</a> repo:
+      <a href="https://github.com/doctorcorral/synthex">synthex</a> repo:
     </p>
 
-    <pre class="block"><code>git clone https://github.com/rcc/synthex
+    <pre class="block"><code>git clone https://github.com/doctorcorral/synthex
 cd synthex
 mix deps.get
 
@@ -285,7 +285,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       The master script chunks candidates, ships them to the hub,
       polls for results. There's a Python smoke-test entrypoint at
       <code class="inline">test_master.py</code> in
-      <a href="https://github.com/rcc/synthex-hub">synthex-hub</a>
+      <a href="https://github.com/doctorcorral/synthex-hub">synthex-hub</a>
       if you'd rather see something runnable in 30 seconds.
     </p>
 
@@ -307,7 +307,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
     <footer>
       <span>synthex.fit · CSHRL research infrastructure</span>
       <span>
-        <a href="https://github.com/rcc/synthex-hub">github</a> ·
+        <a href="https://github.com/doctorcorral/synthex-hub">github</a> ·
         <a href="/api/public-status">status</a> ·
         <a href="/health">health</a>
       </span>

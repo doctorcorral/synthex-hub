@@ -1,17 +1,43 @@
 defmodule Server.Auth do
   @moduledoc """
-  Plug for shared-token bearer auth on `/api/*` routes.
+  Master-only Bearer-token auth.
 
-  Set `API_TOKEN` env var on the server and the same value on each worker.
-  Requests must send `Authorization: Bearer <token>` (or `?token=<token>`
-  fallback for quick curl debugging). When `API_TOKEN` is unset (dev),
-  auth is skipped.
+  Routes split into three classes:
+
+    1. **Public** (always open):
+         /, /index.html, /install, /install.sh, /favicon.ico,
+         /robots.txt, /health, /api/public-status
+
+    2. **Worker** (always open — friends donate compute without
+       needing to be authenticated):
+         /api/worker/*
+
+    3. **Master** (gated by `API_TOKEN`):
+         /api/master/*  + /api/status (the detailed view)
+
+  When `API_TOKEN` is unset/empty, all routes are open — useful for
+  local dev. In production, set the env var via `fly secrets set
+  API_TOKEN=…`.
+
+  ## Threat model
+
+  The token protects against:
+
+    * batch-submission DoS (fill the queue with bogus work)
+    * reading other people's batch payloads / aggregated results
+
+  It does **not** protect against:
+
+    * fake workers submitting poisoned results — those routes are
+      intentionally open. Defend at the experiment layer (require
+      multi-worker consensus, statistical outlier detection on
+      reward distributions). The hub already records `worker_id` on
+      every chunk completion so audits are possible after the fact.
   """
   import Plug.Conn
 
-  # Routes that need to be reachable without auth: health checks, the
-  # public landing page, the worker installer script, and the
-  # aggregate stats counter that drives the landing page.
+  # Routes that need no auth ever — landing page, installer, health
+  # checks, the aggregate counter that drives the landing page.
   @public_paths ~w(
     /
     /health
@@ -23,29 +49,41 @@ defmodule Server.Auth do
     /api/public-status
   )
 
+  # Anyone with the URL can run a worker. We don't trust unknown
+  # workers' results blindly — that's an experiment-design problem,
+  # not an HTTP-auth problem.
+  @worker_prefix "/api/worker"
+
   def init(opts), do: opts
 
-  def call(%Plug.Conn{request_path: path} = conn, _opts) when path in @public_paths,
-    do: conn
-
-  def call(conn, _opts) do
-    case configured_token() do
-      nil ->
+  def call(%Plug.Conn{request_path: path} = conn, _opts) do
+    cond do
+      path in @public_paths ->
         conn
 
-      "" ->
+      String.starts_with?(path, @worker_prefix) ->
         conn
 
-      expected ->
-        if valid?(conn, expected) do
-          conn
-        else
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
-          |> halt()
-        end
+      # Everything else (master submission, master batch reads,
+      # /api/status) requires the token if one is configured.
+      true ->
+        gate(conn)
     end
+  end
+
+  defp gate(conn) do
+    case configured_token() do
+      nil -> conn
+      "" -> conn
+      expected -> if valid?(conn, expected), do: conn, else: deny(conn)
+    end
+  end
+
+  defp deny(conn) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
+    |> halt()
   end
 
   defp valid?(conn, expected) do

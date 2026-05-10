@@ -36,7 +36,7 @@ defmodule Worker.Application do
         Logger.info("  api_token   = configured (#{byte_size(t)} bytes)")
 
       _ ->
-        Logger.warning("  api_token   = NOT SET (workers may be rejected by the hub)")
+        Logger.info("  api_token   = anonymous (no Authorization header sent)")
     end
   end
 end

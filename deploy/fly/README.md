@@ -141,7 +141,7 @@ docker run --rm \
   -e API_TOKEN=<your shared token> \
   -e WORKER_NAME=$(hostname) \
   -e POOL_SIZE=8 \
-  rcc/synthex-worker:latest
+  doctorcorral/synthex-worker:latest
 ```
 
 ## Day-to-day ops

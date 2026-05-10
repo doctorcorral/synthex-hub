@@ -4,9 +4,9 @@
 # `curl https://synthex.fit/install | sh` one-liner can pull it on
 # both Apple-Silicon laptops and x86_64 Linux boxes.
 #
-# Defaults to docker.io/rcc/synthex-worker:latest. Override with:
+# Defaults to docker.io/doctorcorral/synthex-worker:latest. Override with:
 #
-#     IMAGE=ghcr.io/rcc/synthex-worker:latest ./deploy/publish-worker.sh
+#     IMAGE=ghcr.io/doctorcorral/synthex-worker:latest ./deploy/publish-worker.sh
 #     PLATFORMS=linux/amd64 ./deploy/publish-worker.sh        # single arch
 #     TAG=v0.3.0          ./deploy/publish-worker.sh          # extra tag
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/worker"
 
-IMAGE="${IMAGE:-rcc/synthex-worker}"
+IMAGE="${IMAGE:-doctorcorral/synthex-worker}"
 TAG="${TAG:-latest}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER="${BUILDER:-synthex-builder}"

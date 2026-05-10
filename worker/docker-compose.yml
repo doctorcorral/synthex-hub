@@ -1,7 +1,7 @@
 services:
   synthex-worker:
     build: .
-    image: rcc/synthex-worker:latest
+    image: doctorcorral/synthex-worker:latest
     restart: unless-stopped
     environment:
       # Point at your hub. For the local-dev hub, use:
@@ -9,7 +9,9 @@ services:
       # For the public hub at synthex.fit:
       #   https://synthex.fit/api
       SERVER_URL: ${SERVER_URL:-https://synthex.fit/api}
-      API_TOKEN:  ${API_TOKEN:?set API_TOKEN to the shared hub token}
+      # Optional — workers are anonymous by default. Only set if your
+      # hub explicitly requires worker auth.
+      API_TOKEN:  ${API_TOKEN:-}
       POOL_SIZE:  ${POOL_SIZE:-}
       WORKER_NAME: ${WORKER_NAME:-${HOSTNAME:-anon}-docker}
     # Limit CPU usage to leave a few cores free for the host:

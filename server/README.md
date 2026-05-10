@@ -53,7 +53,7 @@ All runtime config is via environment variables:
 | Variable                         | Default                                                            | Notes                                          |
 |----------------------------------|--------------------------------------------------------------------|------------------------------------------------|
 | `DATABASE_URL`                   | `postgres://postgres:postgres@localhost:5432/synthex_hub_dev` (dev)| Required in `MIX_ENV=prod`                     |
-| `API_TOKEN`                      | (unset → auth disabled)                                            | Set in production. Workers send as `Bearer`.   |
+| `API_TOKEN`                      | (unset → all routes open)                                          | Master-only auth. When set, gates `/api/master/*` and `/api/status`. `/api/worker/*` is always open. |
 | `PORT`                           | `4000`                                                             |                                                |
 | `POOL_SIZE`                      | `10`                                                               | DB pool size                                   |
 | `DEFAULT_CHUNK_SIZE`             | `100`                                                              | Used when master payload omits `chunk_size`    |
@@ -79,17 +79,31 @@ and TLS termination automatically.
 
 ## API
 
-Auth is a shared Bearer token: `Authorization: Bearer $API_TOKEN`.
-For curl debugging you can also pass `?token=$API_TOKEN`.
+**Master-only auth.** Endpoints split into three classes:
+
+* **Public** (always open): `/`, `/install`, `/install.sh`, `/health`,
+  `/api/public-status`. The landing page + installer + aggregate
+  counters live here.
+* **Worker** (always open): `/api/worker/*`. Anyone can connect a
+  worker — no token needed. Result-trust is handled at the
+  experiment layer (multi-worker consensus, outlier detection on
+  reward distributions).
+* **Master** (gated by `API_TOKEN`): `/api/master/*` and the
+  detailed `/api/status`. Only the master script submits batches,
+  so only the master needs the token.
+
+Send the master token as `Authorization: Bearer $API_TOKEN`. For
+curl debugging you can also pass `?token=$API_TOKEN`.
 
 ### Health & ops
 
-| Method | Path                            | Notes                                  |
-|--------|---------------------------------|----------------------------------------|
-| GET    | `/health`                       | unauthenticated, returns version       |
-| GET    | `/api/status`                   | active workers, total cores, queue depth |
+| Method | Path                            | Auth   | Notes                                                |
+|--------|---------------------------------|--------|------------------------------------------------------|
+| GET    | `/health`                       | open   | returns version                                      |
+| GET    | `/api/public-status`            | open   | aggregate stats: workers / cores / candidates / experiments |
+| GET    | `/api/status`                   | master | detailed: per-worker pool sizes, queue depth, etc.   |
 
-### Worker endpoints
+### Worker endpoints (always open — no token)
 
 | Method | Path                            | Notes                                                        |
 |--------|---------------------------------|--------------------------------------------------------------|
@@ -98,7 +112,7 @@ For curl debugging you can also pass `?token=$API_TOKEN`.
 | GET    | `/api/worker/jobs/request?worker_id=…` | 200 with chunk payload, or 204 if queue is empty.            |
 | POST   | `/api/worker/jobs/submit`       | Body: `{chunk_id, worker_id, results}`. Idempotent (no-op if already completed). |
 
-### Master endpoints
+### Master endpoints (require `API_TOKEN`)
 
 | Method | Path                                | Notes                                                |
 |--------|-------------------------------------|------------------------------------------------------|
