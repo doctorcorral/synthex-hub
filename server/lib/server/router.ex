@@ -59,6 +59,16 @@ defmodule Server.Router do
     |> send_json(200, Server.Queue.public_status())
   end
 
+  # Per-environment view of in-flight + recently-completed
+  # experiments. Each env collapses its own batch history into a
+  # single "achieved score" so the landing page can show what the
+  # swarm has actually learned, not just job throughput.
+  get "/api/public-status/experiments" do
+    conn
+    |> put_resp_header("cache-control", "public, max-age=15")
+    |> send_json(200, %{experiments: Server.Queue.experiments_summary()})
+  end
+
   # All-time top contributors. Anonymous workers (`name == "anonymous"`)
   # collapse into a single bucket. Cached briefly so the landing page
   # can poll without hammering Postgres.

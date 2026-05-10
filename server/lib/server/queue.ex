@@ -221,6 +221,7 @@ defmodule Server.Queue do
 
         true ->
           batch_id = job.args["batch_id"]
+          chunk_index = job.args["chunk_index"]
           updated_args = Map.put(job.args, "results", results)
           now = DateTime.utc_now()
 
@@ -238,10 +239,17 @@ defmodule Server.Queue do
               where: b.id == ^batch_id,
               update: [
                 inc: [completed_chunks: 1],
-                push: [results: ^%{"chunk_index" => job.args["chunk_index"], "items" => results}]
+                push: [results: ^%{"chunk_index" => chunk_index, "items" => results}]
               ]
             )
             |> Repo.update_all([])
+
+          # Refresh the cached reward summary. We do this in a
+          # separate UPDATE because conditional GREATEST/COALESCE
+          # arithmetic doesn't fit cleanly in the Ecto `inc/push`
+          # form above. Cheap (single row, indexed by PK) and runs
+          # inside the same transaction.
+          maybe_update_score_summary(batch_id, job.args["cmd"], chunk_index, results)
 
           batch = Repo.get!(Batch, batch_id)
 
@@ -297,6 +305,64 @@ defmodule Server.Queue do
       _ -> "anonymous"
     end
   end
+
+  # Roll the new chunk's rewards into the batch's cached aggregates.
+  #
+  #   * `best_reward`     — running max across all chunks. Updated
+  #     atomically via `GREATEST(COALESCE(best_reward, x), x)` so
+  #     concurrent chunk submissions can't lose updates.
+  #   * `baseline_reward` — for `score_bit` batches, set once when
+  #     chunk_index == 0 lands. The master prepends the baseline
+  #     candidate to its candidate list, so item 0 of chunk 0 IS
+  #     the baseline reward.
+  #
+  # No-ops cleanly for `collect_states` results (no `reward` field).
+  defp maybe_update_score_summary(batch_id, cmd, chunk_index, results) do
+    chunk_max = chunk_max_reward(results)
+
+    baseline_reward =
+      if cmd == "score_bit" and chunk_index == 0 do
+        case results do
+          [%{"reward" => r} | _] when is_number(r) -> r * 1.0
+          _ -> nil
+        end
+      end
+
+    if is_nil(chunk_max) and is_nil(baseline_reward) do
+      :ok
+    else
+      # Single UPDATE; either argument may be NULL and that side is
+      # left untouched. Atomic against concurrent chunk submissions.
+      sql = """
+      UPDATE batches
+      SET
+        best_reward = CASE
+          WHEN $1::float8 IS NULL THEN best_reward
+          ELSE GREATEST(COALESCE(best_reward, $1::float8), $1::float8)
+        END,
+        baseline_reward = COALESCE(baseline_reward, $2::float8)
+      WHERE id = $3
+      """
+
+      Repo.query!(sql, [chunk_max, baseline_reward, batch_id])
+      :ok
+    end
+  end
+
+  # Max reward over a chunk's items. Items lacking a numeric
+  # `reward` (e.g. `collect_states` returns `states`/`success`)
+  # contribute nothing, and an all-rewardless chunk yields `nil`.
+  defp chunk_max_reward(results) when is_list(results) do
+    Enum.reduce(results, nil, fn
+      %{"reward" => r}, best when is_number(r) ->
+        if is_nil(best) or r > best, do: r * 1.0, else: best
+
+      _, best ->
+        best
+    end)
+  end
+
+  defp chunk_max_reward(_), do: nil
 
   # ── Worker registration ─────────────────────────────────────
 
@@ -401,6 +467,188 @@ defmodule Server.Queue do
   # jobs. Incremented by length(results) on every chunk submission.
   defp candidates_evaluated do
     Repo.aggregate(WorkerNode, :sum, :candidates_evaluated) || 0
+  end
+
+  @doc """
+  Per-environment summary for the public landing page.
+
+  Returns a list of `%{env_name, active, best_reward, latest, ...}`
+  rows, one per env that has either an in-flight batch or a
+  completed `score_bit` batch in history. Drives the "Active
+  experiments" widget at https://synthex.fit.
+
+  Shape:
+
+      [
+        %{
+          env_name: "Ant-v5",
+          active: %{
+            batch_id: "...",
+            name: "...",
+            cmd: "score_bit",
+            target_bit: 4,
+            total_chunks: 7338,
+            completed_chunks: 164,
+            progress: 0.022,
+            current_best_reward: -42.5,
+            started_at: ~U[...],
+            elapsed_seconds: 9000
+          },                              # nil if no batch in flight
+          best_reward: -38.2,             # all-time max across env's score_bit batches
+          latest: %{                      # most recent COMPLETED score_bit
+            batch_id: "...",
+            best_reward: -38.2,
+            baseline_reward: -52.0,
+            delta: 13.8,
+            target_bit: 3,
+            completed_at: ~U[...]
+          },                              # nil if no completed batches yet
+          completed_batches: 12,
+          total_batches: 13               # active + completed (any cmd)
+        },
+        ...
+      ]
+
+  Cached upstream (HTTP cache-control 15s).
+  """
+  def experiments_summary do
+    # 1) Per-env aggregates over completed score_bit batches
+    history =
+      from(b in Batch,
+        where: b.cmd == "score_bit" and b.status == "completed",
+        group_by: b.env_name,
+        select: %{
+          env_name: b.env_name,
+          best_reward: max(b.best_reward),
+          completed_batches: count(b.id)
+        }
+      )
+      |> Repo.all()
+      |> Map.new(fn row -> {row.env_name, row} end)
+
+    # 2) Per-env count of all batches (any status, any cmd) — useful
+    #    so we surface envs that exist but haven't completed a
+    #    score_bit batch yet.
+    totals =
+      from(b in Batch,
+        group_by: b.env_name,
+        select: {b.env_name, count(b.id)}
+      )
+      |> Repo.all()
+      |> Map.new()
+
+    # 3) Latest completed score_bit batch per env. There are only a
+    #    handful of envs (1 per ongoing experiment), so a per-env
+    #    fetch is cheaper than a window-function gymnastic in Ecto.
+    latest_by_env =
+      Map.keys(history)
+      |> Enum.reduce(%{}, fn env, acc ->
+        case latest_completed_score_bit(env) do
+          nil -> acc
+          batch -> Map.put(acc, env, batch)
+        end
+      end)
+
+    # 4) Active (pending or running) batches. Most recent first per
+    #    env; multiple in-flight batches per env are unusual but we
+    #    surface only the newest.
+    actives =
+      from(b in Batch,
+        where: b.status in ["pending", "running"],
+        order_by: [desc: b.inserted_at]
+      )
+      |> Repo.all()
+
+    active_by_env =
+      Enum.reduce(actives, %{}, fn batch, acc ->
+        Map.put_new(acc, batch.env_name, batch)
+      end)
+
+    # 5) Stitch.
+    env_names =
+      [Map.keys(history), Map.keys(active_by_env), Map.keys(totals)]
+      |> List.flatten()
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    now = DateTime.utc_now()
+
+    Enum.map(env_names, fn env ->
+      hist = Map.get(history, env)
+      active = Map.get(active_by_env, env)
+      latest = Map.get(latest_by_env, env)
+
+      %{
+        env_name: env,
+        active: render_active(active, now),
+        best_reward: hist && hist.best_reward,
+        latest: render_latest(latest),
+        completed_batches: (hist && hist.completed_batches) || 0,
+        total_batches: Map.get(totals, env, 0)
+      }
+    end)
+  end
+
+  defp render_active(nil, _now), do: nil
+
+  defp render_active(%Batch{} = b, now) do
+    progress =
+      if b.total_chunks > 0,
+        do: b.completed_chunks / b.total_chunks,
+        else: 0.0
+
+    elapsed =
+      case b.inserted_at do
+        %DateTime{} = t -> DateTime.diff(now, t, :second)
+        _ -> nil
+      end
+
+    %{
+      batch_id: b.id,
+      name: b.name,
+      cmd: b.cmd,
+      target_bit: get_in(b.payload, ["target_bit"]),
+      total_chunks: b.total_chunks,
+      completed_chunks: b.completed_chunks,
+      progress: progress,
+      current_best_reward: b.best_reward,
+      baseline_reward: b.baseline_reward,
+      started_at: b.inserted_at,
+      elapsed_seconds: elapsed
+    }
+  end
+
+  defp render_latest(nil), do: nil
+
+  defp render_latest(%Batch{} = b) do
+    delta =
+      cond do
+        is_number(b.best_reward) and is_number(b.baseline_reward) ->
+          b.best_reward - b.baseline_reward
+
+        true ->
+          nil
+      end
+
+    %{
+      batch_id: b.id,
+      name: b.name,
+      target_bit: get_in(b.payload, ["target_bit"]),
+      best_reward: b.best_reward,
+      baseline_reward: b.baseline_reward,
+      delta: delta,
+      completed_at: b.completed_at
+    }
+  end
+
+  defp latest_completed_score_bit(env_name) do
+    from(b in Batch,
+      where:
+        b.cmd == "score_bit" and b.status == "completed" and b.env_name == ^env_name,
+      order_by: [desc: b.completed_at],
+      limit: 1
+    )
+    |> Repo.one()
   end
 
   # ── Leaderboard ─────────────────────────────────────────────

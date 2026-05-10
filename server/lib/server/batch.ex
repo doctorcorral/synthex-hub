@@ -20,6 +20,14 @@ defmodule Server.Batch do
     field :completed_at, :utc_datetime_usec
     field :ttl_at, :utc_datetime_usec
 
+    # Reward aggregates, maintained as chunks complete. Cached so the
+    # public landing page can render a per-environment leaderboard
+    # without scanning the (potentially many-MB) `results` array on
+    # every request. NULL while no rewards have arrived yet, or for
+    # non-`score_bit` batches.
+    field :best_reward, :float
+    field :baseline_reward, :float
+
     timestamps(type: :utc_datetime_usec)
   end
 
@@ -37,7 +45,9 @@ defmodule Server.Batch do
       :results,
       :submitter,
       :completed_at,
-      :ttl_at
+      :ttl_at,
+      :best_reward,
+      :baseline_reward
     ])
     |> validate_required([:id, :env_name, :cmd, :total_chunks])
     |> validate_inclusion(:status, ~w(pending running completed failed cancelled))

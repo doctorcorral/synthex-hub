@@ -152,6 +152,83 @@
       margin: 8px 0 16px;
     }
 
+    /* Experiments panel */
+    .exps {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin: 12px 0 24px;
+    }
+    @media (min-width: 720px) {
+      .exps { grid-template-columns: 1fr 1fr; }
+    }
+    .exp {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .exp-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 12px;
+    }
+    .exp-env {
+      font-weight: 600; font-size: 15px; color: var(--fg);
+      letter-spacing: -0.005em;
+    }
+    .exp-state {
+      font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--fg-faint);
+      padding: 2px 8px;
+      border: 1px solid var(--border); border-radius: 999px;
+      white-space: nowrap;
+    }
+    .exp-state.live {
+      color: var(--accent); border-color: var(--accent-dim);
+    }
+    .exp-state.idle {
+      color: var(--fg-dim);
+    }
+    .exp-row {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px; color: var(--fg-dim);
+      font-variant-numeric: tabular-nums;
+      flex-wrap: wrap;
+    }
+    .exp-row .label {
+      color: var(--fg-faint); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .exp-row .val { color: var(--fg); font-weight: 500; }
+    .exp-row .val.delta-pos { color: var(--accent); }
+    .exp-row .val.delta-neg { color: var(--warn); }
+    .progress {
+      flex: 1 1 100%;
+      height: 6px;
+      background: var(--bg-elev-2);
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress > span {
+      display: block; height: 100%;
+      background: var(--accent);
+      transition: width 0.4s ease;
+    }
+    .exps-empty {
+      grid-column: 1 / -1;
+      color: var(--fg-faint);
+      font-style: italic;
+      font-size: 13px;
+      padding: 14px;
+      text-align: center;
+      background: var(--bg-elev);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+    }
+
     /* Leaderboard table */
     .lb {
       width: 100%;
@@ -272,6 +349,19 @@
       <div><div class="stat-num" id="s-cores">·</div><div class="stat-label">cores</div></div>
       <div><div class="stat-num" id="s-jobs">·</div><div class="stat-label">candidates evaluated</div></div>
       <div><div class="stat-num" id="s-batches">·</div><div class="stat-label">experiments completed</div></div>
+    </div>
+
+    <h2>Active experiments <span style="font-weight:400;color:var(--fg-faint);font-size:13px;">(per environment)</span></h2>
+
+    <p style="margin-top:0">
+      Each environment runs its own CEGAR loop on the hub. The
+      <em>live</em> badge means a master is currently submitting
+      candidate batches; <em>achieved</em> is the best reward any
+      candidate has earned across all completed batches for this env.
+    </p>
+
+    <div class="exps" id="experiments">
+      <div class="exps-empty">loading…</div>
     </div>
 
     <h2>Top contributors <span style="font-weight:400;color:var(--fg-faint);font-size:13px;">(all-time)</span></h2>
@@ -463,9 +553,139 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         });
     }
 
+    function fmtScore(n) {
+      if (n === null || n === undefined || Number.isNaN(n)) return '·';
+      const v = Number(n);
+      // Tighten the format for a wide range of MuJoCo rewards
+      // (-1000 → +5000ish). Two decimals, stable width.
+      return (v >= 0 ? '+' : '') + v.toFixed(2);
+    }
+
+    function fmtDelta(d) {
+      if (d === null || d === undefined || Number.isNaN(d)) return null;
+      const v = Number(d);
+      const sign = v > 0 ? '+' : (v < 0 ? '' : '±');
+      return sign + v.toFixed(2);
+    }
+
+    function fmtElapsed(secs) {
+      if (secs === null || secs === undefined) return '';
+      const s = Math.max(0, Math.floor(secs));
+      if (s < 60)      return s + 's';
+      if (s < 3600)    return Math.floor(s / 60) + 'm';
+      if (s < 86400)   return (s / 3600).toFixed(1) + 'h';
+      return (s / 86400).toFixed(1) + 'd';
+    }
+
+    function renderExperiments(rows) {
+      const root = document.getElementById('experiments');
+      if (!rows || rows.length === 0) {
+        root.innerHTML =
+          '<div class="exps-empty">no experiments yet — be the first to fire one off ☝</div>';
+        return;
+      }
+
+      // Active first, then envs with history but currently idle.
+      rows.sort((a, b) => {
+        const aLive = a.active ? 1 : 0;
+        const bLive = b.active ? 1 : 0;
+        if (aLive !== bLive) return bLive - aLive;
+        return String(a.env_name).localeCompare(String(b.env_name));
+      });
+
+      root.innerHTML = rows.map(renderExperimentCard).join('');
+    }
+
+    function renderExperimentCard(r) {
+      const isLive = !!r.active;
+      const stateLabel = isLive ? 'live' : 'idle';
+
+      let progressBar = '';
+      let progressLine = '';
+      if (isLive) {
+        const pct = Math.max(0, Math.min(1, r.active.progress || 0)) * 100;
+        const tb = r.active.target_bit;
+        progressBar =
+          '<div class="progress" aria-label="batch progress">' +
+            '<span style="width:' + pct.toFixed(1) + '%"></span>' +
+          '</div>';
+        progressLine =
+          '<div class="exp-row">' +
+            '<span class="label">batch</span>' +
+            '<span class="val">' + fmt(r.active.completed_chunks) + ' / ' +
+              fmt(r.active.total_chunks) + ' chunks</span>' +
+            (tb !== null && tb !== undefined
+              ? '<span class="label" style="margin-left:8px">bit</span>' +
+                '<span class="val">' + escapeHtml(String(tb)) + '</span>'
+              : '') +
+            '<span class="label" style="margin-left:8px">elapsed</span>' +
+            '<span class="val">' + fmtElapsed(r.active.elapsed_seconds) + '</span>' +
+          '</div>';
+      }
+
+      const achieved =
+        r.best_reward !== null && r.best_reward !== undefined
+          ? '<span class="val">' + fmtScore(r.best_reward) + '</span>'
+          : '<span class="val" style="color:var(--fg-faint)">awaiting first batch</span>';
+
+      let latestLine = '';
+      if (r.latest) {
+        const d = fmtDelta(r.latest.delta);
+        const cls = r.latest.delta > 0 ? 'val delta-pos'
+                  : r.latest.delta < 0 ? 'val delta-neg' : 'val';
+        const tb = r.latest.target_bit;
+        latestLine =
+          '<div class="exp-row">' +
+            '<span class="label">latest</span>' +
+            '<span class="val">' + fmtScore(r.latest.best_reward) + '</span>' +
+            (d !== null
+              ? '<span class="' + cls + '">' + escapeHtml(d) + ' vs baseline</span>'
+              : '') +
+            (tb !== null && tb !== undefined
+              ? '<span class="label" style="margin-left:8px">bit</span>' +
+                '<span class="val">' + escapeHtml(String(tb)) + '</span>'
+              : '') +
+          '</div>';
+      }
+
+      const completed =
+        '<div class="exp-row">' +
+          '<span class="label">batches</span>' +
+          '<span class="val">' + fmt(r.completed_batches) + ' completed</span>' +
+        '</div>';
+
+      return (
+        '<div class="exp">' +
+          '<div class="exp-head">' +
+            '<div class="exp-env">' + escapeHtml(r.env_name) + '</div>' +
+            '<div class="exp-state ' + stateLabel + '">' + stateLabel + '</div>' +
+          '</div>' +
+          '<div class="exp-row">' +
+            '<span class="label">achieved</span>' + achieved +
+          '</div>' +
+          latestLine +
+          progressLine +
+          progressBar +
+          completed +
+        '</div>'
+      );
+    }
+
+    function refreshExperiments() {
+      fetch('/api/public-status/experiments')
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(d => renderExperiments(d.experiments))
+        .catch(() => {
+          document.getElementById('experiments').innerHTML =
+            '<div class="exps-empty">experiments status unavailable</div>';
+        });
+    }
+
     refreshStatus();
+    refreshExperiments();
     refreshLeaderboard();
     setInterval(refreshStatus, 15000);
+    setInterval(refreshExperiments, 15000);
     setInterval(refreshLeaderboard, 30000);
   </script>
 </body>
