@@ -22,7 +22,16 @@ if config_env() == :prod do
 
   config :server, Server.Repo,
     url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE", "10")),
+    # Pool 10 saturated almost immediately under realistic load: with
+    # 12 active workers each completing ~30 chunks/sec, plus master
+    # polling every 5s, plus Oban's own polling, we routinely had
+    # >10 concurrent SQL operations queuing for connections. Bumped
+    # to 30; checkout queue timeout from 15s default to 60s for
+    # extra slack on cold-cache queries against Neon.
+    pool_size: String.to_integer(System.get_env("POOL_SIZE", "30")),
+    queue_target: 1_000,
+    queue_interval: 5_000,
+    timeout: 60_000,
     ssl: ssl_enabled,
     ssl_opts: ssl_opts
 end
