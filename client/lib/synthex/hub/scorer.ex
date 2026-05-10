@@ -56,6 +56,11 @@ defmodule Synthex.Hub.Scorer do
     * `:collect_states_chunk_size` — independent chunk size for the
       `collect_states` command (defaults to 4 seeds per chunk, since
       one rollout episode is much heavier than scoring one candidate).
+    * `:state_stride` — keep every Nth state from each rollout
+      (default: 10). Only the master sees the resulting states (used
+      for feature generation), and the full per-step trajectory is
+      almost never needed. Lower values send more data through the
+      hub; set to 1 to disable subsampling.
     * `:fallback` — a `Synthex.Scoring.t()` invoked for any command
       the hub doesn't know how to handle. Defaults to a function that
       raises.
@@ -102,11 +107,14 @@ defmodule Synthex.Hub.Scorer do
         "#{env_key}-#{:erlang.system_time(:second)}"
       )
 
+    state_stride = Keyword.get(opts, :state_stride, 10)
+
     state = %{
       score_client: client,
       collect_client: collect_client,
       fallback: fallback,
-      batch_prefix: batch_prefix
+      batch_prefix: batch_prefix,
+      state_stride: state_stride
     }
 
     fn request -> dispatch(request, state) end
@@ -135,9 +143,12 @@ defmodule Synthex.Hub.Scorer do
 
   defp dispatch(%{"cmd" => "collect_states"} = request, %{
          collect_client: client,
-         batch_prefix: batch_prefix
+         batch_prefix: batch_prefix,
+         state_stride: state_stride
        }) do
     batch_name = "#{batch_prefix}-collect"
+
+    request = Map.put_new(request, "state_stride", state_stride)
 
     case Client.collect_states(client, request, batch_name: batch_name) do
       {:ok, %{states: states, n_landings: n_landings, n_episodes: n_episodes}} ->

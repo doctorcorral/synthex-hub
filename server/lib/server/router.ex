@@ -14,7 +14,20 @@ defmodule Server.Router do
     cache_control_for_etags: "public, max-age=3600"
 
   plug :match
-  plug Plug.Parsers, parsers: [:json], pass: ["application/json"], json_decoder: Jason
+
+  # Body limit: workers submitting `collect_states` chunks can return
+  # tens of megabytes of trajectories at a time (e.g. Ant: 1000 steps
+  # × 105 obs floats × N seeds). Default is 8 MB, which we'd routinely
+  # blow through. Cap at 64 MB; chunks larger than that should be
+  # subdivided rather than handled here.
+  plug Plug.Parsers,
+    parsers: [:json],
+    pass: ["application/json"],
+    json_decoder: Jason,
+    length: 64_000_000,
+    read_length: 1_000_000,
+    read_timeout: 60_000
+
   plug Server.Auth
   plug :dispatch
 

@@ -187,7 +187,13 @@ def handle_score_bit(job):
 # pool.
 
 
-def collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim):
+def collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim, stride):
+    """
+    Roll out one episode; record at most `max_steps // stride` evenly
+    spaced states. The master only needs a representative sample for
+    feature generation — sending every timestep would push 1-2 MB per
+    seed through the hub for nothing.
+    """
     cfg = ENV_CONFIGS[env_name]
     env_kwargs = cfg.get("env_kwargs", {})
     env = gym.make(env_name, **env_kwargs)
@@ -195,8 +201,9 @@ def collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim):
         obs, _ = env.reset(seed=int(seed))
         states = []
         ep_r = 0.0
-        for _ in range(max_steps):
-            states.append(obs.tolist())
+        for step in range(max_steps):
+            if step % stride == 0:
+                states.append(obs.tolist())
             action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
             obs, r, term, trunc, _ = env.step(action)
             ep_r += float(r)
@@ -223,10 +230,18 @@ def handle_collect_states(job):
     max_steps = int(job.get("max_steps", 1000))
     bits_per_dim = int(job.get("bits_per_dim", 3))
 
+    # Subsample: keep one of every N timesteps. 10 gives ~100 states
+    # per 1000-step episode, plenty for feature generation, and cuts
+    # the JSON payload that crosses the hub by 10×. Master can request
+    # a different stride via the param.
+    stride = max(1, int(job.get("state_stride", 10)))
+
     results = []
     for i, seed in enumerate(seeds):
         try:
-            r = collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim)
+            r = collect_states_one(
+                env_name, seed, bit_preds, max_steps, bits_per_dim, stride
+            )
             r["idx"] = i
         except Exception as e:
             log.exception("collect_states seed=%s failed", seed)

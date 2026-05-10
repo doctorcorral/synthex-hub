@@ -9,7 +9,22 @@ defmodule Server.Application do
     children = [
       Server.Repo,
       {Oban, Application.fetch_env!(:server, Oban)},
-      {Bandit, plug: Server.Router, port: port}
+      {Bandit,
+       plug: Server.Router,
+       port: port,
+       # Workers submit large `collect_states` payloads (multi-megabyte
+       # trajectories). Bandit's default request_line / header limits
+       # are fine; we explicitly bump body-side timeouts here so a slow
+       # upload across the public internet doesn't time out at the
+       # acceptor before Plug.Parsers (in Server.Router) can read it.
+       http_options: [
+         max_request_line_length: 16_384,
+         max_header_length: 16_384,
+         max_requests: 1000
+       ],
+       thousand_island_options: [
+         read_timeout: 60_000
+       ]}
     ]
 
     opts = [strategy: :one_for_one, name: Server.Supervisor]
