@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSHRL Policy Showcase</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        nord0: '#2E3440',
+                        nord1: '#3B4252',
+                        nord2: '#434C5E',
+                        nord3: '#4C566A',
+                        nord4: '#D8DEE9',
+                        nord8: '#88C0D0',
+                        nord9: '#81A1C1',
+                        nord10: '#5E81AC',
+                        nord14: '#A3BE8C',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background-color: #2E3440; color: #D8DEE9; }
+        .video-container { border-radius: 0.5rem; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); cursor: pointer; transition: transform 0.2s; }
+        .video-container:hover { transform: scale(1.02); }
+        pre[class*="language-"] { border-radius: 0.5rem; margin: 0; background: #2E3440; text-shadow: none; font-size: 0.8rem; max-height: 250px; overflow-y: auto; transition: max-height 0.3s; }
+        .card { background-color: #3B4252; border: 1px solid #434C5E; cursor: pointer; transition: all 0.3s ease; }
+        .code-section { display: none; }
+        .card.expanded { grid-column: span 2 / span 2; }
+        .card.expanded pre[class*="language-"] { max-height: 800px; white-space: pre-wrap; word-break: break-all; }
+        .card.expanded .flex-col { flex-direction: column; gap: 1.5rem; }
+        .card.expanded .video-container { width: 100%; max-width: 600px; margin: 0 auto; flex-shrink: 0; }
+        .card.expanded .code-section { width: 100%; display: block; margin-top: 1rem; }
+        
+        /* Modal Styles */
+        #video-modal { display: none; position: fixed; z-index: 50; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.9); }
+        #video-modal.show { display: flex; align-items: center; justify-content: center; }
+        #modal-video { max-width: 90%; max-height: 90%; border-radius: 0.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .close-btn { position: absolute; top: 20px; right: 35px; color: #f1f1f1; font-size: 40px; font-weight: bold; cursor: pointer; }
+        
+        /* Prevent click events inside card from triggering expansion */
+        .no-expand { cursor: auto; }
+    </style>
+</head>
+<body class="min-h-screen p-8 font-sans">
+
+    <div class="max-w-7xl mx-auto">
+        <header class="mb-12 text-center">
+            <h1 class="text-4xl font-bold text-nord8 mb-4">Coinductive Boolean Policy Synthesis</h1>
+            <p class="text-xl text-nord4 max-w-3xl mx-auto">
+                Replacing massive Neural Networks with ultra-compact, interpretable Boolean predicates.
+                Synthesized via <strong>CSHRL</strong> (Coinductive Symmetric Homomorphism Reinforcement Learning).
+                <br><span class="text-sm text-nord9 mt-2 inline-block">Click any card to expand and view the full policy. Click a video to enlarge.</span>
+            </p>
+        </header>
+
+        <!-- Continuous Control Row 1 -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8" id="card-grid">
+            <!-- Half Cheetah -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo HalfCheetah-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~3700</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 17D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 6D (18 bits)</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/halfcheetah.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/halfcheetah.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    bits = [0] * 18
+    # bthigh (Back Thigh)
+    if (2*obs[10] + obs[5] < 0) and (3*obs[10] + obs[15] < 0): bits[0] = 1
+    if not (obs[1] < -0.07) and (-3*obs[0] + obs[4] < 0): bits[1] = 1
+    if (obs[4] < -0.13) and (-1*obs[0] + obs[4] < 0): bits[2] = 1
+    
+    # bshin (Back Shin)
+    if not (obs[8] < 0.0) and (obs[0] < -0.15): bits[3] = 1
+    if (obs[1] < 0.06) or (2*obs[1] + obs[0] < 0): bits[4] = 1
+    if (obs[11] < -15.786): bits[5] = 1
+    
+    # bfoot (Back Foot)
+    if (-5*obs[10] + obs[14] < 0) or (-2*obs[2] + obs[4] < 0): bits[6] = 1
+    if (4*obs[5] + obs[2] < 0) or (-1*obs[1] + obs[5] < 0): bits[7] = 1
+    if not (3*obs[8] + obs[4] < 0) and (obs[8] < 0.07): bits[8] = 1
+    
+    # fthigh (Front Thigh)
+    if (5*obs[3] + obs[13] < 0) or (3*obs[0] + obs[13] < 0): bits[9] = 1
+    if (1*obs[11] + obs[12] < 0) or (-3*obs[7] + obs[11] < 0): bits[10] = 1
+    if (-3*obs[0] + obs[1] < 0) or (obs[8] < -1.367): bits[11] = 1
+    
+    # fshin (Front Shin)
+    if (5*obs[15] + obs[8] < 0) or (3*obs[15] + obs[7] < 0): bits[12] = 1
+    if (-5*obs[4] + obs[5] < 0) and (-1*obs[6] + obs[5] < 0): bits[13] = 1
+    if not (-3*obs[6] + obs[8] < 0) and (-2*obs[5] + obs[8] < 0): bits[14] = 1
+    
+    # ffoot (Front Foot)
+    if (3*obs[10] + obs[12] < 0) or (obs[4] < 0.044): bits[15] = 1
+    if (-4*obs[4] + obs[9] < 0) and (-5*obs[16] + obs[14] < 0): bits[16] = 1
+    if (3*obs[11] + obs[12] < 0): bits[17] = 1
+
+    weights = [1, 2, 4]
+    actions = [0.0] * 6
+    for d in range(6):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -1.0 + 2.0 * s / 7
+    return actions</code></pre>
+                </div>
+            </section>
+
+            <!-- Hopper -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo Hopper-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~1100</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 11D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 3D (9 bits)</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/hopper.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/hopper.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    z, angle, thigh_a, leg_a, foot_a, vx, vz, w, thigh_v, leg_v, foot_v = obs
+    bits = [0] * 9
+    
+    # thigh
+    if (5*thigh_a + foot_a < 0) and (-foot_v**2 + w < 0): bits[0] = 1
+    if (thigh_v < -1.3288) or (z * angle < -0.01003): bits[1] = 1
+    if (-vz + w < 0) and (angle < 0.15): bits[2] = 1
+    
+    # leg
+    if (-5*angle**2 + w < 0) or (-0.01*vx**2 + w < 0): bits[3] = 1
+    if (-0.1*vx**2 + w < 0) and (5*angle**2 + thigh_a < 0): bits[4] = 1
+    if (thigh_a * thigh_v < 0.5) and (thigh_a * w < 0.35): bits[5] = 1
+    
+    # foot
+    if (foot_a * foot_v < -2.062314) or (vx < 0.755179): bits[6] = 1
+    if (-0.5*z**2 + vx < 0) or (foot_a * vx < 0.070144): bits[7] = 1
+    if (4*leg_v**2 + vz < 0) or (5*leg_v**2 + w < 0): bits[8] = 1
+    
+    weights = [1, 2, 4]
+    actions = [0.0] * 3
+    for d in range(3):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -1.0 + 2.0 * s / 7
+    return actions</code></pre>
+                </div>
+            </section>
+
+            <!-- Swimmer -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo Swimmer-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~350</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 8D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 2D (6 bits)</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/swimmer.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/swimmer.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    a0, a1, vx, vy, w0, w1, w2, w3 = obs
+    bits = [0] * 6
+    
+    # torque0
+    if 4*vx + w1 < 0: bits[0] = 1
+    if (0.2*w2**2 + w1 < 0) and (-3*vy + w1 < 0): bits[1] = 1
+    if (-5*a0 + w1 < 0) or (-4*a0 + w1 < 0): bits[2] = 1
+    
+    # torque1
+    if (2*w1 + vx < 0) and (5*w1 + w2 < 0): bits[3] = 1
+    if (1*vy + w1 < 0) and (3*vx + a0 < 0): bits[4] = 1
+    if (1*a0 + vx < 0) and (3*w1 + a0 < 0): bits[5] = 1
+    
+    weights = [1, 2, 4]
+    actions = [0.0] * 2
+    for d in range(2):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -1.0 + 2.0 * s / 7
+    return actions</code></pre>
+                </div>
+            </section>
+
+            <!-- BipedalWalker -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">BipedalWalker-v3</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: 318</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 24D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 4D (12 bits)</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/bipedal.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/bipedal.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    bits = [0] * 12
+    # hip1
+    if (3*obs[4] + obs[6] < 0) or (3*obs[4] + obs[11] < 0): bits[0] = 1
+    if (-3*obs[0] + obs[5] < 0) and (1*obs[1] + obs[6] < 0): bits[1] = 1
+    if (-3*obs[3] + obs[0] < 0) or (5*obs[0] + obs[7] < 0): bits[2] = 1
+    # knee1
+    if (4*obs[11] + obs[4] < 0) or (-3*obs[12]**2 + obs[4] < 0): bits[3] = 1
+    if (-1*obs[3] + obs[11] < 0) and (-2*obs[0]**2 + obs[4] < 0): bits[4] = 1
+    if (obs[16] < 0.30148) or (obs[19] < 0.380977): bits[5] = 1
+    # hip2
+    if not(-1*obs[0]**2 + obs[9] < 0) and (3*obs[11]**2 + obs[10] < 0): bits[6] = 1
+    if (3*obs[10] + obs[9] < 0) and (1*obs[5] + obs[10] < 0): bits[7] = 1
+    if (-3*obs[0]**2 + obs[9] < 0) and (-3*obs[0]**2 + obs[5] < 0): bits[8] = 1
+    # knee2
+    if -2*obs[10] + obs[6] < 0: bits[9] = 1
+    if (-4*obs[10] + obs[4] < 0) or (-2*obs[10] + obs[4] < 0): bits[10] = 1
+    if (2*obs[10] + obs[9] < 0) or (2*obs[11]**2 + obs[10] < 0): bits[11] = 1
+    
+    weights = [1, 2, 4]
+    actions = [0.0] * 4
+    for d in range(4):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -1.0 + 2.0 * s / 7
+    return actions</code></pre>
+                </div>
+            </section>
+
+            <!-- LunarLander -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">LunarLander-v3</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: 308</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 8D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Coordinate Descent</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/lunarlander_cd.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/lunarlander_cd.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    x, y, vx, vy, theta, omega = obs[:6]
+    
+    # FireLeft: angular correction + position check
+    if (theta < -0.07) and (5 * theta + x < 0): 
+        return 1
+        
+    # FireRight: lateral velocity OR altitude-vy ratio
+    if (vx < -0.759715) or (-3 * vy + y < 0): 
+        return 3
+        
+    # FireMain: altitude braking OR high descent speed
+    if (2 * y + vy < 0) or (vy < -0.979988): 
+        return 2
+        
+    # Do Nothing
+    return 0</code></pre>
+                </div>
+            </section>
+
+            <!-- Tetris -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">ALE/Tetris-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: 2300</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Successor-Value</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/tetris.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/tetris.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto no-expand" onclick="event.stopPropagation()">
+                    <p class="text-gray-300 text-sm">
+                        Demonstrates the <strong>"Sacrifice Now, Gain Later"</strong> coinductive property. The engine ignores immediate line-clear rewards, ranking piece placements purely by the positional dominance of the resulting board state.
+                    </p>
+                </div>
+            </section>
+        </div>
+
+        <!-- Continuous Control Row 3 -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+            <!-- Inverted Pendulum -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo InvertedPendulum-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: 1000/1000</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 4D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 1D (3 bits)</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/invpend.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/invpend.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre><code class="language-python">def policy(obs):
+    bits = [0] * 3
+    # force
+    if -5*obs[2] + -2*obs[3] + obs[1] < 0: bits[0] = 1
+    if (-6*obs[0] + -2*obs[3] + obs[2] < 0) and (-7*obs[0] + -2*obs[3] + obs[1] < 0): bits[1] = 1
+    if -8*obs[1] + -1*obs[3] + obs[0] < 0: bits[2] = 1
+    
+    weights = [1, 2, 4]
+    actions = [0.0] * 1
+    for d in range(1):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -3.0 + 6.0 * s / 7
+    return actions</code></pre>
+                </div>
+            </section>
+        </div>
+
+        <!-- Classic Environments -->
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-8 mb-8">
+            
+            <!-- CartPole -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <h2 class="text-lg font-bold text-nord14 mb-2">CartPole-v1</h2>
+                <div class="flex items-center gap-2 mb-2 text-xs text-nord9 flex-wrap">
+                    <span class="bg-nord2 px-2 py-1 rounded">Score: 500/500</span>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/cartpole.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/cartpole.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre class="mt-auto"><code class="language-python">def policy(obs):
+    _, _, theta, theta_dot = obs
+    if 2 * theta + theta_dot < 0:
+        return 0 # Left
+    return 1     # Right</code></pre>
+                </div>
+            </section>
+
+            <!-- MountainCar -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <h2 class="text-lg font-bold text-nord14 mb-2">MountainCar-v0</h2>
+                <div class="flex items-center gap-2 mb-2 text-xs text-nord9 flex-wrap">
+                    <span class="bg-nord2 px-2 py-1 rounded">Score: ~ -119</span>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/mountaincar.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/mountaincar.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre class="mt-auto"><code class="language-python">def policy(obs):
+    pos, vel = obs
+    if 0.01 * pos**2 + vel < 0:
+        return 0 # Left
+    if -0.0012 <= vel < 0:
+        return 0 # Left
+    return 2     # Right</code></pre>
+                </div>
+            </section>
+
+            <!-- Acrobot -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <h2 class="text-lg font-bold text-nord14 mb-2">Acrobot-v1</h2>
+                <div class="flex items-center gap-2 mb-2 text-xs text-nord9 flex-wrap">
+                    <span class="bg-nord2 px-2 py-1 rounded">Score: ~ -85</span>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/acrobot.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/acrobot.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre class="mt-auto"><code class="language-python">def policy(obs):
+    c1, s1, c2, s2, w1, w2 = obs
+    if 4 * w2 + s1 < 0:
+        return 0 # Torque Neg
+    if c1*w2 < -0.61 or 2*c2**2 + c1 < 0:
+        return 2 # Torque Pos
+    return 2</code></pre>
+                </div>
+            </section>
+
+            <!-- Breakout -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <h2 class="text-lg font-bold text-nord14 mb-2">Breakout-v5</h2>
+                <div class="flex items-center gap-2 mb-2 text-xs text-nord9 flex-wrap">
+                    <span class="bg-nord2 px-2 py-1 rounded">Score: ~350+</span>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/breakout.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/breakout.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre class="mt-auto"><code class="language-python">def policy(state):
+    bx, by, px, bdx, bdy = state
+    if -bx + px < 0 and -0.01*bx**2 + px < 0:
+        return 0 # RIGHT
+    if by * px < 6820.0:
+        return 1 # NOOP
+    return 2     # LEFT</code></pre>
+                </div>
+            </section>
+
+            <!-- Pong -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <h2 class="text-lg font-bold text-nord14 mb-2">Pong-v5 (RAM)</h2>
+                <div class="flex items-center gap-2 mb-2 text-xs text-nord9 flex-wrap">
+                    <span class="bg-nord2 px-2 py-1 rounded">Score: 32.8% Win Rate</span>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/pong.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/pong.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                    <pre class="mt-auto"><code class="language-python">def policy(bx, by, py, vy):
+    if -py + by < 0:
+        return 0  # UP
+    if bx < 138 or by < 94:
+        return 1  # NOOP
+    return 2  # DOWN</code></pre>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- The Modal -->
+    <div id="video-modal" onclick="closeModal(event)">
+        <span class="close-btn" onclick="closeModal(event)">&times;</span>
+        <video id="modal-video" controls autoplay loop class="bg-black">
+            <source id="modal-video-source" src="" type="video/mp4">
+        </video>
+    </div>
+
+    <script>
+        function openModal(videoSrc, event) {
+            if (event) event.stopPropagation();
+            const modal = document.getElementById('video-modal');
+            const modalVideo = document.getElementById('modal-video');
+            const modalVideoSource = document.getElementById('modal-video-source');
+            
+            modalVideoSource.src = videoSrc;
+            modalVideo.load();
+            modalVideo.play();
+            modal.classList.add('show');
+        }
+
+        function closeModal(event) {
+            // Close if clicking outside the video or on the close button
+            if (event.target.id === 'video-modal' || event.target.classList.contains('close-btn')) {
+                const modal = document.getElementById('video-modal');
+                const modalVideo = document.getElementById('modal-video');
+                
+                modalVideo.pause();
+                const modalVideoSource = document.getElementById('modal-video-source');
+                modalVideoSource.src = '';
+                modal.classList.remove('show');
+            }
+        }
+
+        function toggleExpand(element) {
+            const isExpanded = element.classList.contains('expanded');
+            
+            // Close any currently expanded card
+            document.querySelectorAll('.card.expanded').forEach(card => {
+                card.classList.remove('expanded');
+                // Remove inline style that forces flex-direction column when unexpanded
+                const innerContainer = card.querySelector('.flex-col');
+                if(innerContainer) innerContainer.style.flexDirection = '';
+            });
+
+            if (!isExpanded) {
+                element.classList.add('expanded');
+                setTimeout(() => {
+                    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 100);
+            }
+        }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+</body>
+</html>

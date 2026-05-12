@@ -5,12 +5,12 @@ defmodule Server.Router do
   plug Plug.Logger, log: :info
 
   # Serve everything under priv/static at the root URL — landing page
-  # (index.html) and the worker installer (install.sh). Cached for an
-  # hour; bust by redeploying.
+  # (index.html), worker installer (install.sh), and the static
+  # showcase page (showcase/). Cached for an hour; bust by redeploying.
   plug Plug.Static,
     at: "/",
     from: {:server, "priv/static"},
-    only: ~w(index.html install.sh favicon.ico robots.txt assets),
+    only: ~w(index.html install.sh favicon.ico robots.txt assets showcase),
     cache_control_for_etags: "public, max-age=3600"
 
   plug :match
@@ -35,6 +35,17 @@ defmodule Server.Router do
 
   get "/" do
     serve_static(conn, "index.html", "text/html; charset=utf-8")
+  end
+
+  # Showcase: hand-curated static page with policy videos.
+  # `/showcase` and `/showcase/` resolve to the index file; everything
+  # under `/showcase/*` is served verbatim by Plug.Static above.
+  get "/showcase" do
+    serve_static(conn, "showcase/index.html", "text/html; charset=utf-8")
+  end
+
+  get "/showcase/" do
+    serve_static(conn, "showcase/index.html", "text/html; charset=utf-8")
   end
 
   # `curl https://synthex.fit/install | sh` — no extension, served as

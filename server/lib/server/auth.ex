@@ -51,9 +51,10 @@ defmodule Server.Auth do
 
   # Prefixes that are unconditionally open. `/api/public-status` covers
   # the bare counter endpoint AND the nested leaderboard/contributor
-  # endpoints under it. Worker endpoints are open so friends can donate
+  # endpoints under it. `/showcase` serves the hand-curated static page
+  # and its videos. Worker endpoints are open so friends can donate
   # compute without being authenticated.
-  @public_prefixes ["/api/public-status"]
+  @public_prefixes ["/api/public-status", "/showcase"]
   @worker_prefix "/api/worker"
 
   def init(opts), do: opts

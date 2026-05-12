@@ -190,11 +190,16 @@
       transform: rotate(90deg);
     }
 
-    /* Policy code section, only shown when expanded */
+    /* Policy code section, only shown when expanded. We drive
+       visibility off `aria-expanded` so toggleExp() only has to
+       flip a single attribute. */
     .exp-policy {
       margin-top: 6px;
       border-top: 1px solid var(--border);
       padding-top: 12px;
+    }
+    .exp[aria-expanded="false"] .exp-policy {
+      display: none;
     }
     .exp-policy .policy-head {
       display: flex; align-items: baseline; justify-content: space-between;
@@ -671,7 +676,6 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         }
         card.setAttribute('aria-expanded', 'true');
         const slot = card.querySelector('.exp-policy');
-        slot.hidden = false;
         fetchPolicyInto(slot, env, /*useCache=*/true);
         setTimeout(() => fetchPolicyInto(slot, env, false), 50);
       });
@@ -805,8 +809,9 @@ mix run experiments/humanoid/round-1.exs</code></pre>
           progressLine +
           progressBar +
           completed +
-          // Lazily filled by toggleExp() on first expansion
-          '<div class="exp-policy" hidden></div>' +
+          // Lazily filled by toggleExp() on first expansion;
+          // visibility driven by .exp[aria-expanded] CSS rules.
+          '<div class="exp-policy"></div>' +
         '</div>'
       );
     }
@@ -876,7 +881,6 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       card.setAttribute('aria-expanded', 'true');
       expandedEnvs.add(env);
       const slot = card.querySelector('.exp-policy');
-      slot.hidden = false;
 
       // Use cache for instant feedback, but always queue a fresh
       // fetch so a user staring at an expanded card sees their
