@@ -580,19 +580,31 @@ defmodule Server.Queue do
         end
       end)
 
-    # 4) Active (pending or running) batches. Most recent first per
-    #    env; multiple in-flight batches per env are unusual but we
-    #    surface only the newest.
+    # 4) Active (pending or running) batches. Group sub-batches by
+    #    logical name (stripping `-partN` suffix added by
+    #    `Synthex.Hub.Client.score_bit/3` when it splits a candidate
+    #    list across multiple HTTP submits) so the landing page
+    #    shows ONE row per logical score_bit, with aggregated
+    #    chunk counts AND aggregated liveness.
+    #
+    #    Why this matters: without grouping, the dashboard always
+    #    picks the newest sub-batch, which by construction is the
+    #    LAST one the master will get around to polling — so its
+    #    master_polled_at stays NULL for hours and the card flips
+    #    to "stalled" even though the master is healthily working
+    #    its way through earlier sub-batches.
     actives =
       from(b in Batch,
         where: b.status in ["pending", "running"],
-        order_by: [desc: b.inserted_at]
+        order_by: [asc: b.inserted_at]
       )
       |> Repo.all()
 
     active_by_env =
-      Enum.reduce(actives, %{}, fn batch, acc ->
-        Map.put_new(acc, batch.env_name, batch)
+      actives
+      |> Enum.group_by(& &1.env_name)
+      |> Map.new(fn {env, env_batches} ->
+        {env, aggregate_active_subbatches(env_batches)}
       end)
 
     # 5) Stitch.
@@ -622,35 +634,119 @@ defmodule Server.Queue do
 
   defp render_active(nil, _now), do: nil
 
-  defp render_active(%Batch{} = b, now) do
+  defp render_active(%{} = agg, now) do
     progress =
-      if b.total_chunks > 0,
-        do: b.completed_chunks / b.total_chunks,
+      if agg.total_chunks > 0,
+        do: agg.completed_chunks / agg.total_chunks,
         else: 0.0
 
     elapsed =
-      case b.inserted_at do
+      case agg.inserted_at do
         %DateTime{} = t -> DateTime.diff(now, t, :second)
         _ -> nil
       end
 
-    {health, polled_ago} = compute_health(b, now)
+    {health, polled_ago} = compute_health_from(agg.master_polled_at, agg.inserted_at, now)
 
     %{
-      batch_id: b.id,
-      name: b.name,
-      cmd: b.cmd,
-      target_bit: get_in(b.payload, ["target_bit"]),
-      total_chunks: b.total_chunks,
-      completed_chunks: b.completed_chunks,
+      batch_id: agg.id,
+      name: agg.name,
+      cmd: agg.cmd,
+      target_bit: agg.target_bit,
+      total_chunks: agg.total_chunks,
+      completed_chunks: agg.completed_chunks,
       progress: progress,
-      current_best_reward: b.best_reward,
-      baseline_reward: b.baseline_reward,
-      started_at: b.inserted_at,
+      current_best_reward: agg.best_reward,
+      baseline_reward: agg.baseline_reward,
+      started_at: agg.inserted_at,
       elapsed_seconds: elapsed,
       health: health,
       master_polled_seconds_ago: polled_ago,
-      master_polled_at: b.master_polled_at
+      master_polled_at: agg.master_polled_at,
+      subbatch_count: agg.subbatch_count
+    }
+  end
+
+  # Group active batches by logical name (strip `-partN`) and
+  # collapse each group into a single aggregate that mirrors the
+  # %Batch{} fields render_active/2 needs. For non-split batches
+  # the group has size 1 and aggregation is a no-op.
+  defp aggregate_active_subbatches(batches) do
+    batches
+    |> Enum.group_by(fn b -> strip_part_suffix(b.name) end)
+    |> Map.values()
+    |> Enum.max_by(&group_priority/1)
+    |> aggregate_group()
+  end
+
+  defp strip_part_suffix(name) when is_binary(name) do
+    Regex.replace(~r/-part\d+$/, name, "")
+  end
+
+  defp strip_part_suffix(other), do: other
+
+  # Choose which logical batch to surface per env. Preference:
+  #   1. groups with ANY recent master_polled_at (alive master)
+  #   2. groups inserted most recently (newest experiment)
+  defp group_priority(batches) do
+    max_polled =
+      batches
+      |> Enum.map(& &1.master_polled_at)
+      |> Enum.reject(&is_nil/1)
+      |> case do
+        [] -> ~U[1970-01-01 00:00:00.000000Z]
+        xs -> Enum.max(xs, DateTime)
+      end
+
+    max_inserted =
+      batches
+      |> Enum.map(& &1.inserted_at)
+      |> Enum.max(DateTime)
+
+    {max_polled, max_inserted}
+  end
+
+  defp aggregate_group(batches) do
+    # Representative = oldest sub-batch (sub-batch 0): the one the
+    # master submitted and polls first, and the one that carries
+    # the right `cmd`, `payload`, `started_at` semantics. We then
+    # overwrite chunk counts and poll timestamps with cross-group
+    # aggregates so the dashboard reflects the WHOLE logical batch.
+    rep = Enum.min_by(batches, & &1.inserted_at, DateTime)
+
+    total_chunks = Enum.reduce(batches, 0, &(&1.total_chunks + &2))
+    completed = Enum.reduce(batches, 0, &(&1.completed_chunks + &2))
+
+    best_reward =
+      batches
+      |> Enum.map(& &1.best_reward)
+      |> Enum.reject(&is_nil/1)
+      |> case do
+        [] -> nil
+        xs -> Enum.max(xs)
+      end
+
+    max_polled =
+      batches
+      |> Enum.map(& &1.master_polled_at)
+      |> Enum.reject(&is_nil/1)
+      |> case do
+        [] -> nil
+        xs -> Enum.max(xs, DateTime)
+      end
+
+    %{
+      id: rep.id,
+      name: strip_part_suffix(rep.name),
+      cmd: rep.cmd,
+      target_bit: get_in(rep.payload, ["target_bit"]),
+      total_chunks: total_chunks,
+      completed_chunks: completed,
+      best_reward: best_reward,
+      baseline_reward: rep.baseline_reward,
+      inserted_at: rep.inserted_at,
+      master_polled_at: max_polled,
+      subbatch_count: length(batches)
     }
   end
 
@@ -666,15 +762,14 @@ defmodule Server.Queue do
   #                  haven't had a chance to be polled once)
   @stalled_threshold_seconds 300
 
-  defp compute_health(%Batch{master_polled_at: nil} = b, now) do
-    age = DateTime.diff(now, b.inserted_at, :second)
-    cond do
-      age >= @stalled_threshold_seconds -> {"no_poll_yet", nil}
-      true -> {"healthy", nil}
-    end
+  defp compute_health_from(nil, inserted_at, now) do
+    age = DateTime.diff(now, inserted_at, :second)
+    if age >= @stalled_threshold_seconds,
+      do: {"no_poll_yet", nil},
+      else: {"healthy", nil}
   end
 
-  defp compute_health(%Batch{master_polled_at: polled_at}, now) do
+  defp compute_health_from(%DateTime{} = polled_at, _inserted_at, now) do
     secs = DateTime.diff(now, polled_at, :second)
     health = if secs > @stalled_threshold_seconds, do: "stalled", else: "healthy"
     {health, secs}

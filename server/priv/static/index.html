@@ -806,12 +806,23 @@ mix run experiments/humanoid/round-1.exs</code></pre>
             pct.toFixed(1) + '% complete">' +
             '<span style="width:' + pct.toFixed(1) + '%"></span>' +
           '</div>';
+        // When score_bit candidates exceed the per-submit cap, the
+        // client splits into N sub-batches and the server aggregates
+        // them back. Show the count so users understand why total
+        // chunks can be in the tens of thousands.
+        const subCount = r.active.subbatch_count;
+        const subFrag =
+          (subCount && subCount > 1)
+            ? ' <span class="label" style="margin-left:6px">(' +
+                fmt(subCount) + ' sub-batches)</span>'
+            : '';
         progressLine =
           '<div class="exp-row">' +
             '<span class="label">batch</span>' +
             '<span class="val">' + fmt(r.active.completed_chunks) + ' / ' +
               fmt(r.active.total_chunks) + ' chunks</span>' +
             '<span class="val" style="color:var(--fg-dim)">(' + pct.toFixed(1) + '%)</span>' +
+            subFrag +
             (tb !== null && tb !== undefined
               ? '<span class="label" style="margin-left:8px">bit</span>' +
                 '<span class="val">' + escapeHtml(String(tb)) + '</span>'
