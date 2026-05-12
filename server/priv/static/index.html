@@ -807,35 +807,53 @@ mix run experiments/humanoid/round-1.exs</code></pre>
             '<span style="width:' + pct.toFixed(1) + '%"></span>' +
           '</div>';
         // When score_bit candidates exceed the per-submit cap, the
-        // client splits into N sub-batches and the server aggregates
-        // them back. Show the count so users understand why total
-        // chunks can be in the tens of thousands.
+        // client splits into N parts (sub-batches over HTTP) and
+        // the server aggregates them back into one logical batch.
+        // Show the part count so visitors understand why "chunks
+        // total" can be in the tens of thousands.
         const subCount = r.active.subbatch_count;
-        const subFrag =
+        const partsFrag =
           (subCount && subCount > 1)
-            ? ' <span class="label" style="margin-left:6px">(' +
-                fmt(subCount) + ' sub-batches)</span>'
+            ? '<span class="val" style="color:var(--fg-dim);margin-left:6px">' +
+                'across ' + fmt(subCount) + ' parts</span>'
             : '';
+
+        // What's the master doing right now? Surfacing the command
+        // and (for score_bit) which bit it's searching makes the
+        // "completed: 0" counter below it self-explanatory: it
+        // counts how many such steps have finished, not chunks.
+        const cmd = r.active.cmd || 'unknown';
+        const stepLabel =
+          cmd === 'score_bit'
+            ? 'scoring bit ' + (tb !== null && tb !== undefined ? tb : '?')
+            : cmd === 'collect_states'
+              ? 'collecting states'
+              : cmd;
+
         progressLine =
           '<div class="exp-row">' +
-            '<span class="label">batch</span>' +
+            '<span class="label">step</span>' +
+            '<span class="val">' + escapeHtml(stepLabel) + '</span>' +
+            '<span class="label" style="margin-left:8px">elapsed</span>' +
+            '<span class="val">' + fmtElapsed(r.active.elapsed_seconds) + '</span>' +
+          '</div>' +
+          '<div class="exp-row">' +
+            '<span class="label">progress</span>' +
             '<span class="val">' + fmt(r.active.completed_chunks) + ' / ' +
               fmt(r.active.total_chunks) + ' chunks</span>' +
             '<span class="val" style="color:var(--fg-dim)">(' + pct.toFixed(1) + '%)</span>' +
-            subFrag +
-            (tb !== null && tb !== undefined
-              ? '<span class="label" style="margin-left:8px">bit</span>' +
-                '<span class="val">' + escapeHtml(String(tb)) + '</span>'
-              : '') +
-            '<span class="label" style="margin-left:8px">elapsed</span>' +
-            '<span class="val">' + fmtElapsed(r.active.elapsed_seconds) + '</span>' +
+            partsFrag +
           '</div>';
       }
 
+      // Historical counter — score_bit completions only (those are
+      // the "bits accepted" CEGAR milestones; collect_states batches
+      // are infrastructure plumbing and excluded by the server).
       const completed =
         '<div class="exp-row">' +
-          '<span class="label">batches</span>' +
-          '<span class="val">' + fmt(r.completed_batches) + ' completed</span>' +
+          '<span class="label">history</span>' +
+          '<span class="val">' + fmt(r.completed_batches) +
+            ' score_bit completions</span>' +
         '</div>';
 
       // Stalled note: explicit, can't-miss line just under the
