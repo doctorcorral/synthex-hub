@@ -54,13 +54,22 @@ Synthex.Gym.Mujoco.solve(:humanoid,
   depth: 1,
   max_coeff: 5,
 
-  # Humanoid has 348 obs dims. axis + diag alone are already ~120k
-  # features; adding sq_diag + prod brings it to ~250k. Tridiag at
-  # full strength would be ~4 BILLION — utterly intractable. We
-  # restrict it to the first 23 dims (qpos minus root excludes 22,
-  # plus 1 buffer) which roughly corresponds to joint positions,
-  # the most physically meaningful for tridiagonal "linkage" patterns.
-  feature_types: [:axis, :diag, :sq_diag, :prod, :tridiag],
+  # Humanoid has 348 obs dims. The original [:axis, :diag, :sq_diag,
+  # :prod, :tridiag] catalog generated ~5.8M candidates per bit —
+  # which, even after client-side sub-batching, takes hours just to
+  # *upload*. We trim to [:axis, :diag, :tridiag] which keeps the
+  # most physically meaningful features (single-axis thresholds,
+  # diagonal quadratic forms, joint linkages) while bringing the
+  # per-bit candidate count down by ~10x. We can always promote
+  # individual bits to the richer catalog later by re-running with
+  # the full feature_types list and `start_iter`.
+  #
+  # Tridiag is the wildcard: at full strength on 348 dims it's
+  # ~4 BILLION combos. We restrict it to the first 23 dims (qpos
+  # minus root excludes 22, plus 1 buffer) which roughly corresponds
+  # to joint positions, the most physically meaningful for
+  # tridiagonal "linkage" patterns.
+  feature_types: [:axis, :diag, :tridiag],
   tridiag_max_coeff: 2,
   tridiag_dims: 0..22,
   n_episodes: 30,

@@ -634,6 +634,8 @@ defmodule Server.Queue do
         _ -> nil
       end
 
+    {health, polled_ago} = compute_health(b, now)
+
     %{
       batch_id: b.id,
       name: b.name,
@@ -645,8 +647,37 @@ defmodule Server.Queue do
       current_best_reward: b.best_reward,
       baseline_reward: b.baseline_reward,
       started_at: b.inserted_at,
-      elapsed_seconds: elapsed
+      elapsed_seconds: elapsed,
+      health: health,
+      master_polled_seconds_ago: polled_ago,
+      master_polled_at: b.master_polled_at
     }
+  end
+
+  # Liveness derived from the master's poll cadence. Masters call
+  # `GET /api/master/batches/:id` every few seconds while a batch is
+  # in flight; the router stamps `master_polled_at` on each call.
+  #
+  #   :healthy     — polled within @stalled_threshold_seconds
+  #   :stalled     — last poll older than the threshold
+  #   :no_poll_yet — batch exists but has never been polled AND has
+  #                  been around for at least @stalled_threshold_seconds
+  #                  (so we don't flap on freshly-created batches that
+  #                  haven't had a chance to be polled once)
+  @stalled_threshold_seconds 300
+
+  defp compute_health(%Batch{master_polled_at: nil} = b, now) do
+    age = DateTime.diff(now, b.inserted_at, :second)
+    cond do
+      age >= @stalled_threshold_seconds -> {"no_poll_yet", nil}
+      true -> {"healthy", nil}
+    end
+  end
+
+  defp compute_health(%Batch{master_polled_at: polled_at}, now) do
+    secs = DateTime.diff(now, polled_at, :second)
+    health = if secs > @stalled_threshold_seconds, do: "stalled", else: "healthy"
+    {health, secs}
   end
 
   defp render_latest(nil), do: nil
@@ -750,6 +781,25 @@ defmodule Server.Queue do
 
   defp default_chunk_size do
     Application.get_env(:server, :default_chunk_size, @default_chunk_size)
+  end
+
+  @doc """
+  Stamp `master_polled_at = now()` on a batch. Called from the
+  router on every master poll so the landing page can tell when a
+  master has gone silent (process crashed, network died, ...) even
+  while the batch is still marked active.
+
+  Returns `:ok` regardless — failure to update the timestamp must
+  never block the poll response.
+  """
+  def touch_master_poll(batch_id) when is_binary(batch_id) do
+    try do
+      from(b in Batch, where: b.id == ^batch_id)
+      |> Repo.update_all(set: [master_polled_at: DateTime.utc_now()])
+      :ok
+    rescue
+      _ -> :ok
+    end
   end
 
   # ── Policy snapshots ────────────────────────────────────────

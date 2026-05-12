@@ -20,7 +20,23 @@ defmodule Synthex.Hub.Client do
   @default_url "https://synthex.fit/api"
   @default_chunk_size 100
   @default_poll_interval_ms 5_000
-  @default_request_timeout_ms 30_000
+
+  # 30s was fine for slim polls but catastrophic for batch submits:
+  # uploading tens of MB of candidates over consumer broadband
+  # routinely takes longer, and a transport timeout silently kills
+  # the master mid-CEGAR-step. 5 min is comfortable headroom; the
+  # actual submit ceiling is bounded by the server's 64 MB body
+  # cap and the per-submit candidate cap below.
+  @default_request_timeout_ms 300_000
+
+  # Hard upper bound on candidates per `submit_batch` HTTP POST.
+  # Beyond this we automatically split into multiple sub-batches
+  # client-side and aggregate the results — see `score_bit/3`.
+  # 50_000 keeps the JSON body comfortably under the server's
+  # 64 MB Plug.Parsers cap (each candidate ~50 B + payload
+  # wrapper) with plenty of margin for nested predicate ADTs.
+  @default_max_candidates_per_submit 50_000
+
   @default_max_wait_ms 24 * 60 * 60 * 1000
 
   @type t :: %__MODULE__{
@@ -70,29 +86,44 @@ defmodule Synthex.Hub.Client do
   """
   def score_bit(%__MODULE__{} = client, payload, opts \\ []) do
     name = Keyword.get(opts, :batch_name, "synthex-#{:erlang.system_time(:millisecond)}")
+
+    max_per_submit =
+      Keyword.get(opts, :max_candidates_per_submit, @default_max_candidates_per_submit)
+
     target_bit = payload["target_bit"]
     bit_preds = payload["bit_predicates"]
     baseline_pred = Enum.at(bit_preds, target_bit)
 
+    # Prepend baseline so it always lands as the FIRST result item
+    # across the entire (possibly multi-sub-batch) submission.
     augmented_candidates = [baseline_pred | payload["candidates"]]
+    n_total = length(augmented_candidates)
 
-    body =
-      payload
-      |> Map.put("name", name)
-      |> Map.put("chunk_size", client.chunk_size)
-      |> Map.put("candidates", augmented_candidates)
+    # Auto-chunk: high-dim envs (Humanoid: ~5.8M features) blow past
+    # any sane HTTP body cap when shipped as a single POST. We split
+    # into sub-batches of <= max_per_submit candidates, submit each
+    # in sequence, then concatenate per-chunk results back into one
+    # logical "score_bit" response.
+    groups =
+      augmented_candidates
+      |> Enum.chunk_every(max_per_submit)
+      |> Enum.with_index()
 
-    with {:ok, batch_id, total_chunks} <- submit_batch(client, body),
-         _ =
-           Logger.info(
-             "[Hub] batch #{batch_id} submitted: #{total_chunks} chunks, " <>
-               "#{length(augmented_candidates)} candidates (incl. baseline)"
-           ),
-         {:ok, results} <- await_batch(client, batch_id) do
+    n_sub = length(groups)
+
+    if n_sub > 1 do
+      Logger.info(
+        "[Hub] score_bit: #{n_total} candidates > #{max_per_submit}/submit; " <>
+          "splitting into #{n_sub} sub-batches"
+      )
+    end
+
+    with {:ok, sub_batches} <- submit_score_bit_subbatches(client, payload, name, groups, n_sub),
+         {:ok, items_by_idx} <- await_score_bit_subbatches(client, sub_batches) do
       flat =
-        results
-        |> Enum.sort_by(fn chunk -> chunk["chunk_index"] end)
-        |> Enum.flat_map(fn chunk -> chunk["items"] end)
+        items_by_idx
+        |> Enum.sort_by(fn {sub_idx, _items} -> sub_idx end)
+        |> Enum.flat_map(fn {_sub_idx, items} -> items end)
 
       case flat do
         [baseline | rest] ->
@@ -101,17 +132,73 @@ defmodule Synthex.Hub.Client do
             |> Enum.with_index()
             |> Enum.map(fn {item, global_idx} -> Map.put(item, "idx", global_idx) end)
 
+          [{first_batch_id, _, _} | _] = sub_batches
+
           {:ok,
            %{
              scores: scores,
              baseline_reward: Map.get(baseline, "reward", 0.0),
-             batch_id: batch_id
+             batch_id: first_batch_id
            }}
 
         [] ->
-          {:error, "batch #{batch_id} completed with no results"}
+          [{first_batch_id, _, _} | _] = sub_batches
+          {:error, "batch #{first_batch_id} completed with no results"}
       end
     end
+  end
+
+  defp submit_score_bit_subbatches(client, payload, name, groups, n_sub) do
+    Enum.reduce_while(groups, {:ok, []}, fn {candidates_chunk, sub_idx}, {:ok, acc} ->
+      sub_name = if n_sub == 1, do: name, else: "#{name}-part#{sub_idx}"
+
+      body =
+        payload
+        |> Map.put("name", sub_name)
+        |> Map.put("chunk_size", client.chunk_size)
+        |> Map.put("candidates", candidates_chunk)
+
+      case submit_batch(client, body) do
+        {:ok, batch_id, total_chunks} ->
+          if n_sub > 1 do
+            Logger.info(
+              "[Hub]  sub-batch #{sub_idx + 1}/#{n_sub} submitted: #{batch_id} " <>
+                "(#{length(candidates_chunk)} candidates, #{total_chunks} chunks)"
+            )
+          else
+            Logger.info(
+              "[Hub] batch #{batch_id} submitted: #{total_chunks} chunks, " <>
+                "#{length(candidates_chunk)} candidates (incl. baseline)"
+            )
+          end
+
+          {:cont, {:ok, [{batch_id, total_chunks, sub_idx} | acc]}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, list} -> {:ok, Enum.reverse(list)}
+      err -> err
+    end
+  end
+
+  defp await_score_bit_subbatches(client, sub_batches) do
+    Enum.reduce_while(sub_batches, {:ok, []}, fn {batch_id, _total, sub_idx}, {:ok, acc} ->
+      case await_batch(client, batch_id) do
+        {:ok, results} ->
+          items =
+            results
+            |> Enum.sort_by(fn chunk -> chunk["chunk_index"] end)
+            |> Enum.flat_map(fn chunk -> chunk["items"] end)
+
+          {:cont, {:ok, [{sub_idx, items} | acc]}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
   end
 
   @doc """
@@ -181,7 +268,13 @@ defmodule Synthex.Hub.Client do
     case Req.post(url(client, "/master/batches"),
            headers: auth_headers(client),
            json: payload,
+           # `receive_timeout` is the overall request budget in Req:
+           # connection + send + first response byte. Big POSTs to
+           # `/master/batches` can take a minute or more to upload,
+           # so we give the whole thing the full request_timeout_ms.
            receive_timeout: client.request_timeout_ms,
+           pool_timeout: 30_000,
+           connect_options: [timeout: 30_000],
            retry: false
          ) do
       {:ok, %{status: 201, body: %{"batch_id" => id, "total_chunks" => n}}} ->

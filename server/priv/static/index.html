@@ -254,6 +254,26 @@
     .exp-state.idle {
       color: var(--fg-dim);
     }
+    .exp-state.stalled {
+      color: var(--warn);
+      border-color: var(--warn);
+      background: rgba(255, 184, 108, 0.10);
+      font-weight: 600;
+    }
+    /* Tinted card when the master has gone silent — unmistakable
+       at a glance even before reading the badge text. */
+    .exp.stalled {
+      border-color: var(--warn);
+      background: linear-gradient(180deg,
+                                  rgba(255, 184, 108, 0.06),
+                                  var(--bg-elev));
+    }
+    .exp-stalled-note {
+      font-size: 11px;
+      color: var(--warn);
+      margin-top: -2px;
+      font-style: italic;
+    }
     .exp-row {
       display: flex; align-items: center; gap: 10px;
       font-size: 13px; color: var(--fg-dim);
@@ -657,10 +677,16 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       }
 
       // Active first, then envs with history but currently idle.
+      // Sort:  stalled cards first (need attention) → healthy live →
+      //        idle envs, then alphabetical inside each tier.
+      const tier = r => {
+        if (!r.active) return 2;
+        const h = r.active.health;
+        return (h === 'stalled' || h === 'no_poll_yet') ? 0 : 1;
+      };
       rows.sort((a, b) => {
-        const aLive = a.active ? 1 : 0;
-        const bLive = b.active ? 1 : 0;
-        if (aLive !== bLive) return bLive - aLive;
+        const ta = tier(a), tb = tier(b);
+        if (ta !== tb) return ta - tb;
         return String(a.env_name).localeCompare(String(b.env_name));
       });
 
@@ -690,7 +716,18 @@ mix run experiments/humanoid/round-1.exs</code></pre>
 
     function renderExperimentCard(r) {
       const isLive = !!r.active;
-      const stateLabel = isLive ? 'live' : 'idle';
+      // Health comes from the server's experiments_summary endpoint
+      // (driven by `master_polled_at` on each batch). Possible values:
+      //   "healthy"     — master polled recently
+      //   "stalled"     — master polled at least once but has gone silent
+      //   "no_poll_yet" — master never polled and batch is old enough
+      //                   that we'd expect a poll (master crashed
+      //                   before its first poll)
+      const health = isLive ? r.active.health : null;
+      const isStalled = health === 'stalled' || health === 'no_poll_yet';
+      const stateLabel =
+        isStalled ? 'stalled' :
+        isLive    ? 'live'    : 'idle';
 
       // ── primary score line ─────────────────────────────────
       // Order of preference:
@@ -790,9 +827,23 @@ mix run experiments/humanoid/round-1.exs</code></pre>
           '<span class="val">' + fmt(r.completed_batches) + ' completed</span>' +
         '</div>';
 
+      // Stalled note: explicit, can't-miss line just under the
+      // headline score, explaining WHY the card is tinted red.
+      let stalledNote = '';
+      if (isStalled) {
+        const ago = r.active.master_polled_seconds_ago;
+        const msg =
+          health === 'no_poll_yet'
+            ? 'master crashed before its first poll'
+            : 'master hasn\u2019t checked in for ' + fmtElapsed(ago || 0);
+        stalledNote =
+          '<div class="exp-stalled-note">\u26a0 ' + escapeHtml(msg) + '</div>';
+      }
+
       const env = r.env_name;
+      const cardCls = 'exp' + (isStalled ? ' stalled' : '');
       return (
-        '<div class="exp" data-env="' + escapeHtml(env) + '" ' +
+        '<div class="' + cardCls + '" data-env="' + escapeHtml(env) + '" ' +
              'aria-expanded="false" role="button" tabindex="0" ' +
              'onclick="toggleExp(this, event)" ' +
              'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleExp(this,event)}">' +
@@ -803,6 +854,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
             '</div>' +
             '<div class="exp-state ' + stateLabel + '">' + stateLabel + '</div>' +
           '</div>' +
+          stalledNote +
           scoreRow +
           historicalLine +
           latestLine +

@@ -28,6 +28,11 @@ defmodule Server.Batch do
     field :best_reward, :float
     field :baseline_reward, :float
 
+    # Stamped on every `GET /api/master/batches/:id` so we can tell
+    # whether the master is alive. Used by `experiments_summary/0`
+    # to compute the `health` flag surfaced on the landing page.
+    field :master_polled_at, :utc_datetime_usec
+
     timestamps(type: :utc_datetime_usec)
   end
 
@@ -47,7 +52,8 @@ defmodule Server.Batch do
       :completed_at,
       :ttl_at,
       :best_reward,
-      :baseline_reward
+      :baseline_reward,
+      :master_polled_at
     ])
     |> validate_required([:id, :env_name, :cmd, :total_chunks])
     |> validate_inclusion(:status, ~w(pending running completed failed cancelled))

@@ -286,6 +286,8 @@ defmodule Server.Router do
   end
 
   defp send_batch_progress(conn, batch_id) do
+    Server.Queue.touch_master_poll(batch_id)
+
     case Server.Queue.get_batch_progress(batch_id) do
       {:ok, row} ->
         send_json(conn, 200, %{
@@ -313,6 +315,8 @@ defmodule Server.Router do
   end
 
   defp send_full_batch(conn, batch_id) do
+    Server.Queue.touch_master_poll(batch_id)
+
     case Server.Queue.get_batch(batch_id) do
       {:ok, batch} ->
         send_json(conn, 200, %{
