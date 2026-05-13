@@ -70,6 +70,15 @@ defmodule Server.Router do
     |> send_json(200, Server.Queue.public_status())
   end
 
+  # Live load stream — Server-Sent Events, one frame per second
+  # carrying %Server.Metrics.snapshot/0 fields. Public, CORS-open,
+  # cheap (every client reads from the MetricsBroker ETS cache, no
+  # DB queries per connection). EventSource clients will reconnect
+  # automatically when this hits its 5-min duration cap.
+  get "/api/public-status/stream" do
+    Server.SSEStream.serve(conn)
+  end
+
   # CORS preflight for browsers fetching public-status from any
   # origin (showcase pages, embeds, etc.).
   options "/api/public-status" do

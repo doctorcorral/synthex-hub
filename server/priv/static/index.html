@@ -153,6 +153,69 @@
     }
 
     /* Experiments panel */
+    /* ── Live load strip (SSE-driven) ──────────────────────── */
+    .liveload {
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      padding: 10px 8px;
+      margin: 8px 0 24px 0;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      flex-wrap: wrap;
+      position: relative;
+    }
+    .ll-tile {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1 1 auto;
+      min-width: 92px;
+      padding: 4px 16px;
+      border-right: 1px solid var(--border);
+    }
+    .ll-tile:last-of-type { border-right: none; }
+    .ll-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--fg-dim);
+    }
+    .ll-val {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      font-variant-numeric: tabular-nums;
+      transition: color 250ms, transform 250ms;
+    }
+    .ll-val.bump {
+      /* brief flash when the value changes — communicates "live"
+         even when underlying numbers move slowly. */
+      color: var(--accent);
+      transform: scale(1.04);
+    }
+    .ll-pulse {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent-dim);
+      animation: ll-pulse 1.5s ease-in-out infinite;
+    }
+    .ll-pulse.disconnected {
+      background: var(--warn);
+      box-shadow: 0 0 6px var(--warn);
+      animation: none;
+    }
+    @keyframes ll-pulse {
+      0%, 100% { opacity: 0.35; transform: scale(0.85); }
+      50%      { opacity: 1.0;  transform: scale(1.0);  }
+    }
+
     .exps {
       display: grid;
       grid-template-columns: 1fr;
@@ -447,6 +510,19 @@
       candidate batches; <em>achieved</em> is the best reward any
       candidate has earned across all completed batches for this env.
     </p>
+
+    <!-- Live-load strip: SSE-driven, ticks once a second from
+         /api/public-status/stream. The pulse dot turns orange if
+         the stream drops; numbers flash on change. -->
+    <div class="liveload" id="liveload" aria-label="Live server load">
+      <div class="ll-tile"><span class="ll-label">workers</span><span class="ll-val" data-k="workers_active">·</span></div>
+      <div class="ll-tile"><span class="ll-label">cores</span><span class="ll-val" data-k="cores_total">·</span></div>
+      <div class="ll-tile"><span class="ll-label">executing</span><span class="ll-val" data-k="chunks_executing">·</span></div>
+      <div class="ll-tile"><span class="ll-label">pending</span><span class="ll-val" data-k="chunks_pending">·</span></div>
+      <div class="ll-tile"><span class="ll-label">evals / min</span><span class="ll-val" data-k="evals_per_minute">·</span></div>
+      <div class="ll-tile"><span class="ll-label">total evals</span><span class="ll-val" data-k="evals_total">·</span></div>
+      <span class="ll-pulse disconnected" id="ll-pulse" title="connecting…"></span>
+    </div>
 
     <div class="exps" id="experiments">
       <div class="exps-empty">loading…</div>
@@ -1040,6 +1116,72 @@ mix run experiments/humanoid/round-1.exs</code></pre>
     setInterval(refreshStatus, 15000);
     setInterval(refreshExperiments, 15000);
     setInterval(refreshLeaderboard, 30000);
+
+    // ── Live-load SSE wiring ─────────────────────────────────────
+    // EventSource subscribes to /api/public-status/stream and gets
+    // one frame per second from the server's MetricsBroker. The
+    // pulse dot turns orange on disconnect; browsers auto-reconnect.
+    (function() {
+      const pulse = document.getElementById('ll-pulse');
+      const tiles = document.querySelectorAll('#liveload [data-k]');
+
+      function fmt(v, k) {
+        if (v == null) return '·';
+        if (typeof v !== 'number') return String(v);
+        if (k === 'evals_total') {
+          if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+          if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+          if (v >= 1e3) return v.toLocaleString();
+          return String(v);
+        }
+        if (k === 'evals_per_minute') {
+          if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+          if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+          return String(v);
+        }
+        return v.toLocaleString();
+      }
+
+      function apply(snap) {
+        tiles.forEach(el => {
+          const k = el.getAttribute('data-k');
+          if (!(k in snap)) return;
+          const formatted = fmt(snap[k], k);
+          if (el.textContent !== formatted) {
+            el.textContent = formatted;
+            el.classList.remove('bump');
+            // Force reflow so the animation restarts on rapid updates.
+            void el.offsetWidth;
+            el.classList.add('bump');
+            setTimeout(() => el.classList.remove('bump'), 400);
+          }
+        });
+      }
+
+      let es = null;
+      function connect() {
+        try { if (es) es.close(); } catch(_) {}
+        es = new EventSource('/api/public-status/stream');
+        es.onopen = () => {
+          pulse.classList.remove('disconnected');
+          pulse.title = 'live';
+        };
+        es.onmessage = (e) => {
+          try {
+            const snap = JSON.parse(e.data);
+            if (!snap.loading) apply(snap);
+          } catch (_) {}
+        };
+        es.onerror = () => {
+          pulse.classList.add('disconnected');
+          pulse.title = 'reconnecting…';
+          // EventSource handles reconnection itself; nothing to do.
+        };
+      }
+
+      // Defer slightly so the rest of the page paints first.
+      setTimeout(connect, 100);
+    })();
   </script>
 </body>
 </html>

@@ -9,6 +9,11 @@ defmodule Server.Application do
     children = [
       Server.Repo,
       {Oban, Application.fetch_env!(:server, Oban)},
+      # MetricsBroker caches one Server.Metrics.snapshot/0 per
+      # second for the SSE load stream. Must start AFTER the Repo
+      # (it queries on init) and BEFORE Bandit (so the route is
+      # answerable as soon as Bandit binds the port).
+      Server.MetricsBroker,
       {Bandit, plug: Server.Router, port: port}
     ]
 
