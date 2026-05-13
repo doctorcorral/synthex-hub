@@ -23,11 +23,21 @@ defmodule Server.Workers.ExperimentCegarIter do
 
   ## Heartbeat
 
-  Iter jobs can take many hours on slow envs. Oban's `Lifeline`
-  plugin reaps "executing" jobs whose `attempted_at` falls behind
-  `rescue_after`, which would prematurely kill a healthy iter. We
-  spawn a `Task` that updates `attempted_at` every 60s for the
-  duration of the iter; it dies on `perform/1` exit.
+  Iter jobs can take many hours on slow envs, and a single bit
+  search can churn for minutes without producing an acceptance.
+  Two things need a regular pulse:
+
+    * Oban's `Lifeline` plugin reaps "executing" jobs whose
+      `attempted_at` falls behind `rescue_after`. We bump
+      `attempted_at` to keep the iter alive in Oban.
+    * The public dashboard derives `health` from
+      `experiments.updated_at` (see `Experiments.compute_health/1`).
+      Without a beat the dashboard mislabels a healthy iter as
+      `stalled` whenever a bit search runs longer than the
+      stalled-threshold.
+
+  A single `Task` updates both rows every
+  `@heartbeat_interval_ms`; it dies on `perform/1` exit.
   """
 
   use Oban.Worker,
@@ -65,7 +75,7 @@ defmodule Server.Workers.ExperimentCegarIter do
         :ok
 
       {:ok, %Experiment{} = exp} ->
-        heartbeat = start_heartbeat(job_id)
+        heartbeat = start_heartbeat(job_id, exp.id)
 
         try do
           do_iter(exp)
@@ -281,26 +291,32 @@ defmodule Server.Workers.ExperimentCegarIter do
     :erlang.phash2({exp_id, cegar_iter, iter})
   end
 
-  # Update job.attempted_at every minute so Oban's Lifeline plugin
-  # doesn't classify a healthy multi-hour iter as a zombie and
-  # reset it to "available" mid-run.
-  defp start_heartbeat(job_id) do
-    Task.start_link(fn -> heartbeat_loop(job_id) end)
+  # Pulse both Oban (so Lifeline doesn't reap a slow iter) and the
+  # experiment row (so the dashboard's `heartbeat_seconds_ago` reflects
+  # real liveness, not just bit-acceptance events).
+  defp start_heartbeat(job_id, exp_id) do
+    Task.start_link(fn -> heartbeat_loop(job_id, exp_id) end)
   end
 
-  defp heartbeat_loop(job_id) do
+  defp heartbeat_loop(job_id, exp_id) do
     receive do
       :stop -> :ok
     after
       @heartbeat_interval_ms ->
-        try do
-          from(j in Oban.Job, where: j.id == ^job_id)
-          |> Repo.update_all(set: [attempted_at: DateTime.utc_now()])
-        rescue
-          _ -> :ok
-        end
+        beat(job_id, exp_id)
+        heartbeat_loop(job_id, exp_id)
+    end
+  end
 
-        heartbeat_loop(job_id)
+  defp beat(job_id, exp_id) do
+    try do
+      from(j in Oban.Job, where: j.id == ^job_id)
+      |> Repo.update_all(set: [attempted_at: DateTime.utc_now()])
+
+      from(e in Experiment, where: e.id == ^exp_id)
+      |> Repo.update_all(set: [updated_at: DateTime.utc_now()])
+    rescue
+      _ -> :ok
     end
   end
 
