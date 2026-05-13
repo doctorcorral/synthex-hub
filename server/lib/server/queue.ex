@@ -544,18 +544,15 @@ defmodule Server.Queue do
   """
   def experiments_summary do
     # 1) Per-env aggregates over completed score_bit batches
-    history =
-      from(b in Batch,
-        where: b.cmd == "score_bit" and b.status == "completed",
-        group_by: b.env_name,
-        select: %{
-          env_name: b.env_name,
-          best_reward: max(b.best_reward),
-          completed_batches: count(b.id)
-        }
-      )
-      |> Repo.all()
-      |> Map.new(fn row -> {row.env_name, row} end)
+    # `Synthex.Hub.Client.score_bit/3` splits large candidate lists
+    # into N HTTP sub-batches named "<base>-part0", ..., "<base>-partK".
+    # A logical CEGAR bit search corresponds to ONE such <base>, not
+    # to a single Batch row — so naive counts here would tally each
+    # sub-batch separately and (worse) declare bit-search complete
+    # the moment a small trailing part finishes. We aggregate by
+    # stripped name and only count a logical group as "complete"
+    # when ALL its sub-batches are complete.
+    history = compute_history_per_env()
 
     # 2) Per-env count of all batches (any status, any cmd) — useful
     #    so we surface envs that exist but haven't completed a
@@ -777,7 +774,7 @@ defmodule Server.Queue do
 
   defp render_latest(nil), do: nil
 
-  defp render_latest(%Batch{} = b) do
+  defp render_latest(%{} = b) do
     delta =
       cond do
         is_number(b.best_reward) and is_number(b.baseline_reward) ->
@@ -790,7 +787,7 @@ defmodule Server.Queue do
     %{
       batch_id: b.id,
       name: b.name,
-      target_bit: get_in(b.payload, ["target_bit"]),
+      target_bit: get_in(b.payload || %{}, ["target_bit"]),
       best_reward: b.best_reward,
       baseline_reward: b.baseline_reward,
       delta: delta,
@@ -799,14 +796,110 @@ defmodule Server.Queue do
   end
 
   defp latest_completed_score_bit(env_name) do
-    from(b in Batch,
-      where:
-        b.cmd == "score_bit" and b.status == "completed" and b.env_name == ^env_name,
-      order_by: [desc: b.completed_at],
-      limit: 1
-    )
-    |> Repo.one()
+    # Same logical-batch aggregation as `compute_history_per_env/0`:
+    # collapse `<base>-partN` sub-batches into one logical batch and
+    # only count those whose ALL parts have status="completed".
+    # Return a synthesized struct with aggregated chunk counts and
+    # the max best_reward across the group — that's the actual
+    # "best candidate found during this bit search", not just one
+    # tail sub-batch's score.
+    rows =
+      from(b in Batch,
+        where:
+          b.cmd == "score_bit" and b.env_name == ^env_name,
+        select: %{
+          status: b.status,
+          name: b.name,
+          best_reward: b.best_reward,
+          baseline_reward: b.baseline_reward,
+          completed_at: b.completed_at,
+          inserted_at: b.inserted_at,
+          payload: b.payload,
+          id: b.id,
+          total_chunks: b.total_chunks,
+          completed_chunks: b.completed_chunks
+        }
+      )
+      |> Repo.all()
+
+    rows
+    |> Enum.group_by(fn r -> strip_part_suffix(r.name) end)
+    |> Enum.filter(fn {_logical, parts} ->
+      Enum.all?(parts, &(&1.status == "completed"))
+    end)
+    |> case do
+      [] ->
+        nil
+
+      groups ->
+        groups
+        |> Enum.map(fn {_logical, parts} -> aggregate_completed_group(parts) end)
+        |> Enum.max_by(fn agg -> agg.completed_at end, DateTime, fn -> nil end)
+    end
   end
+
+  defp aggregate_completed_group(parts) do
+    rep = Enum.min_by(parts, & &1.inserted_at, DateTime)
+    best = parts |> Enum.map(& &1.best_reward) |> Enum.reject(&is_nil/1) |> safe_max()
+
+    last_completed =
+      parts |> Enum.map(& &1.completed_at) |> Enum.reject(&is_nil/1) |> safe_max_dt()
+
+    %{
+      id: rep.id,
+      name: strip_part_suffix(rep.name),
+      best_reward: best,
+      baseline_reward: rep.baseline_reward,
+      completed_at: last_completed,
+      inserted_at: rep.inserted_at,
+      payload: rep.payload,
+      total_chunks: Enum.reduce(parts, 0, &(&1.total_chunks + &2)),
+      completed_chunks: Enum.reduce(parts, 0, &(&1.completed_chunks + &2))
+    }
+  end
+
+  defp compute_history_per_env do
+    from(b in Batch,
+      where: b.cmd == "score_bit",
+      select: %{
+        env_name: b.env_name,
+        status: b.status,
+        name: b.name,
+        best_reward: b.best_reward
+      }
+    )
+    |> Repo.all()
+    |> Enum.group_by(& &1.env_name)
+    |> Map.new(fn {env, env_rows} ->
+      completed_logical =
+        env_rows
+        |> Enum.group_by(fn r -> strip_part_suffix(r.name) end)
+        |> Enum.filter(fn {_logical, parts} ->
+          Enum.all?(parts, &(&1.status == "completed"))
+        end)
+
+      best =
+        completed_logical
+        |> Enum.flat_map(fn {_logical, parts} ->
+          Enum.map(parts, & &1.best_reward)
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> safe_max()
+
+      {env,
+       %{
+         env_name: env,
+         best_reward: best,
+         completed_batches: length(completed_logical)
+       }}
+    end)
+  end
+
+  defp safe_max([]), do: nil
+  defp safe_max(xs), do: Enum.max(xs)
+
+  defp safe_max_dt([]), do: nil
+  defp safe_max_dt(xs), do: Enum.max(xs, DateTime)
 
   # ── Leaderboard ─────────────────────────────────────────────
 
