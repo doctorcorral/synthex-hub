@@ -54,8 +54,16 @@ defmodule Server.MetricsBroker do
   @impl true
   def init(_) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])
+
+    # Enable per-scheduler wall-time accounting once at boot. Cheap
+    # (negligible runtime overhead) and lets us compute the BEAM's
+    # overall CPU utilization as a delta between consecutive samples
+    # — surfaced as `cpu_pct` in every snapshot so the landing
+    # page has at least one metric that visibly fluctuates.
+    :erlang.system_flag(:scheduler_wall_time, true)
+
     Process.send_after(self(), :refresh, 100)
-    {:ok, %{ring: :queue.new()}}
+    {:ok, %{ring: :queue.new(), prev_swt: nil}}
   end
 
   @impl true
@@ -97,13 +105,61 @@ defmodule Server.MetricsBroker do
 
     rate_per_min = rate_per_minute_from(ring, now_ms, raw.evals_total)
 
+    {cpu_pct, new_swt} = scheduler_util_pct(state.prev_swt)
+
     snapshot =
       raw
       |> Map.put(:evals_per_minute, rate_per_min)
+      |> Map.put(:cpu_pct, cpu_pct)
       |> Map.put(:ts, DateTime.utc_now() |> DateTime.to_iso8601())
 
     :ets.insert(@table, {:snapshot, snapshot})
-    %{state | ring: ring}
+    %{state | ring: ring, prev_swt: new_swt}
+  end
+
+  # Overall BEAM scheduler utilization since the previous tick,
+  # expressed as a percentage (0..100, rounded to 1 decimal).
+  #
+  # `:erlang.statistics(:scheduler_wall_time)` returns one
+  # `{scheduler_id, active, total}` triple per scheduler since
+  # wall-time accounting was enabled. The percentage is the ratio
+  # of summed active-time delta over summed total-time delta
+  # between consecutive samples — same shape as `:scheduler.utilization/2`
+  # without that function's blocking call.
+  #
+  # First tick returns 0.0 because there is no previous sample.
+  defp scheduler_util_pct(prev) do
+    case :erlang.statistics(:scheduler_wall_time) do
+      swt when is_list(swt) ->
+        now = Enum.sort(swt)
+
+        case prev do
+          nil ->
+            {0.0, now}
+
+          prev_sorted when length(prev_sorted) == length(now) ->
+            {active_d, total_d} =
+              Enum.zip(now, prev_sorted)
+              |> Enum.reduce({0, 0}, fn {{_, a1, t1}, {_, a0, t0}}, {a_acc, t_acc} ->
+                {a_acc + (a1 - a0), t_acc + (t1 - t0)}
+              end)
+
+            pct =
+              if total_d > 0,
+                do: Float.round(active_d / total_d * 100, 1),
+                else: 0.0
+
+            {pct, now}
+
+          _ ->
+            # scheduler count changed (rare, e.g. online_schedulers
+            # was adjusted). Reset baseline cleanly.
+            {0.0, now}
+        end
+
+      _ ->
+        {0.0, prev}
+    end
   end
 
   defp trim_ring(ring, now_ms) do

@@ -521,6 +521,7 @@
       <div class="ll-tile"><span class="ll-label">pending</span><span class="ll-val" data-k="chunks_pending">·</span></div>
       <div class="ll-tile"><span class="ll-label">evals / min</span><span class="ll-val" data-k="evals_per_minute">·</span></div>
       <div class="ll-tile"><span class="ll-label">total evals</span><span class="ll-val" data-k="evals_total">·</span></div>
+      <div class="ll-tile"><span class="ll-label">cpu</span><span class="ll-val" data-k="cpu_pct">·</span></div>
       <span class="ll-pulse disconnected" id="ll-pulse" title="connecting…"></span>
     </div>
 
@@ -1128,6 +1129,9 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       function fmt(v, k) {
         if (v == null) return '·';
         if (typeof v !== 'number') return String(v);
+        if (k === 'cpu_pct') {
+          return v.toFixed(1) + '%';
+        }
         if (k === 'evals_total') {
           if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
           if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
