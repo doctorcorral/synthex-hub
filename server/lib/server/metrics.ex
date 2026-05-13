@@ -44,8 +44,9 @@ defmodule Server.Metrics do
   end
 
   defp cores_total do
-    (from(w in WorkerNode, where: w.status == "active")
-     |> Repo.aggregate(:sum, :pool_size)) || 0
+    from(w in WorkerNode, where: w.status == "active")
+    |> Repo.aggregate(:sum, :pool_size)
+    |> to_int()
   end
 
   defp oban_count(states) do
@@ -54,8 +55,20 @@ defmodule Server.Metrics do
   end
 
   defp evals_total do
-    Repo.aggregate(WorkerNode, :sum, :candidates_evaluated) || 0
+    Repo.aggregate(WorkerNode, :sum, :candidates_evaluated)
+    |> to_int()
   end
+
+  # Postgres' `SUM(integer)` returns numeric/bigint; Ecto sometimes
+  # decodes that as `%Decimal{}` (depending on adapter version), and
+  # downstream consumers — JSON encoding, arithmetic against ints in
+  # the broker's rolling window — choke on the mixed types.
+  # Normalize to a plain integer here so the rest of the system
+  # never has to think about it.
+  defp to_int(nil), do: 0
+  defp to_int(%Decimal{} = d), do: Decimal.to_integer(d)
+  defp to_int(n) when is_integer(n), do: n
+  defp to_int(n) when is_float(n), do: trunc(n)
 
   defp active_batches do
     from(b in Batch, where: b.status in ["pending", "running"])
