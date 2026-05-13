@@ -36,11 +36,45 @@ defmodule Server.Application do
           other -> Logger.warning("ObanFailureHandler attach: #{inspect(other)}")
         end
 
+        rescue_orphan_executing_jobs()
+
         {:ok, pid}
 
       err ->
         err
     end
+  end
+
+  # Self-heal: if the previous node died mid-iter (deploy, crash, OOM),
+  # the iter row sits in `:executing` until Lifeline notices, which can
+  # be up to `rescue_after` (currently 60 min). Our cegar-iter
+  # heartbeat ticks every 60 s, so any executing master job whose
+  # `attempted_at` is older than a couple of beats can't possibly have
+  # a live owner — reset it to `:available` so Oban picks it up
+  # immediately. The `unique` constraint on ExperimentCegarIter still
+  # protects against double-running.
+  defp rescue_orphan_executing_jobs do
+    import Ecto.Query
+
+    cutoff = DateTime.add(DateTime.utc_now(), -180, :second)
+
+    {n, _} =
+      from(j in Oban.Job,
+        where: j.queue == "master" and j.state == "executing" and j.attempted_at < ^cutoff
+      )
+      |> Server.Repo.update_all(set: [state: "available"])
+
+    if n > 0 do
+      Logger.warning(
+        "Rescued #{n} orphan executing master job(s) on boot (attempted_at older than 180s)."
+      )
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("Orphan rescue failed: #{inspect(error)}")
+      :ok
   end
 
   defp log_auth_status do
