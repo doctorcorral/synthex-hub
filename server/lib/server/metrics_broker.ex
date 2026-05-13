@@ -86,9 +86,13 @@ defmodule Server.MetricsBroker do
     raw = Server.Metrics.snapshot()
     now_ms = System.system_time(:millisecond)
 
+    # Erlang's `:queue.in/2` takes `(Item, Queue)` — item first.
+    # Don't pipe `state.ring` in: the pipe would put the queue
+    # in the Item slot and produce a vague `argument error`
+    # because `:queue.in/2` accepts any term as Item but checks
+    # the Queue's internal shape.
     ring =
-      state.ring
-      |> :queue.in({now_ms, raw.evals_total})
+      :queue.in({now_ms, raw.evals_total}, state.ring)
       |> trim_ring(now_ms)
 
     rate_per_min = rate_per_minute_from(ring, now_ms, raw.evals_total)
