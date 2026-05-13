@@ -47,8 +47,13 @@ defmodule Server.MixProject do
       # we configure it to talk to localhost so we reuse all the
       # existing batch/chunk machinery without going through the
       # public proxy.
+      #
+      # Both deps default to public git refs so the Docker build
+      # (whose context is `server/` only) can fetch them. Set
+      # SYNTHEX_PATH / SYNTHEX_HUB_CLIENT_PATH to local checkouts
+      # for live iteration against unpushed branches.
       synthex_dep(),
-      {:synthex_hub_client, path: "../client"}
+      synthex_hub_client_dep()
     ]
   end
 
@@ -60,6 +65,20 @@ defmodule Server.MixProject do
       _ ->
         ref = System.get_env("SYNTHEX_GIT_REF", "main")
         {:synthex, git: "https://github.com/doctorcorral/synthex.git", ref: ref, override: true}
+    end
+  end
+
+  defp synthex_hub_client_dep do
+    case System.get_env("SYNTHEX_HUB_CLIENT_PATH") do
+      path when is_binary(path) and path != "" ->
+        {:synthex_hub_client, path: path}
+
+      _ ->
+        ref = System.get_env("SYNTHEX_HUB_GIT_REF", "main")
+        {:synthex_hub_client,
+         git: "https://github.com/doctorcorral/synthex-hub.git",
+         sparse: "client",
+         ref: ref}
     end
   end
 
