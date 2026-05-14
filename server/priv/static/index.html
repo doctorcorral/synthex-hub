@@ -970,14 +970,26 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         '</div>';
 
       // Stalled note: explicit explanation just below the headline,
-      // explaining WHY the card is tinted.
+      // explaining WHY the card is tinted. Three distinct cases:
+      //   stalled     — heartbeat dead → master likely crashed
+      //   no_progress (pending) — submitted but bootstrap never started
+      //   no_progress (running) — master alive but no bits accepted yet,
+      //                           usually means undersized swarm
       let stalledNote = '';
       if (isStalled) {
         const ago = r.active.heartbeat_seconds_ago;
-        const msg =
-          health === 'no_progress'
-            ? 'experiment submitted but bootstrap never started'
-            : 'no checkpoint for ' + fmtElapsed(ago || 0) + ' — Oban master may have crashed';
+        const elapsed = r.active.elapsed_seconds;
+        const status = r.active.status;
+        let msg;
+        if (health === 'no_progress' && status === 'pending') {
+          msg = 'submitted but bootstrap never started';
+        } else if (health === 'no_progress') {
+          msg = 'running for ' + fmtElapsed(elapsed || 0) +
+            ' with no bits accepted — swarm likely too small for the load';
+        } else {
+          msg = 'no checkpoint for ' + fmtElapsed(ago || 0) +
+            ' — Oban master may have crashed';
+        }
         stalledNote =
           '<div class="exp-stalled-note">\u26a0 ' + escapeHtml(msg) + '</div>';
       }

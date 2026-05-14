@@ -16,6 +16,16 @@ defmodule Server.Jobs.OrphanReaper do
       → cancel the outstanding Oban chunk jobs, mark batch
       `cancelled`, surface `warn` system_event.
 
+    * Active `batches` rows with `experiment_id IS NULL` whose
+      `master_polled_at` hasn't moved in @stalled_seconds AND that
+      still have outstanding chunks. These are pre-refactor laptop
+      batches whose master is gone but whose chunks are still sitting
+      in the queue, starving live experiments. Cancelling frees the
+      worker swarm to focus on the actively-running CEGAR loops.
+
+      → cancel the outstanding Oban chunk jobs, mark batch
+      `cancelled`, surface `warn` system_event.
+
   Runs every 2 minutes (configured in `config.exs`). Defense-in-depth:
   with masters running as supervised Oban jobs, this should usually
   be a no-op. When it isn't, the landing page banner immediately
@@ -39,6 +49,7 @@ defmodule Server.Jobs.OrphanReaper do
   def perform(_job) do
     reap_stalled_experiments()
     cancel_orphan_batches()
+    cancel_unowned_batches()
     :ok
   end
 
@@ -126,6 +137,56 @@ defmodule Server.Jobs.OrphanReaper do
           "cancelled_jobs" => cancelled_jobs
         }
       )
+    end)
+  end
+
+  # Pre-refactor / abandoned batches: experiment_id IS NULL and no
+  # master polling. Their chunks sit in the chunks queue forever and
+  # are interleaved with live experiments' chunks by the round-robin
+  # scheduler, so leaving them around starves real work. The
+  # master_polled_at gate is important — a brand-new batch from a
+  # client that hasn't started polling yet would have NULL there
+  # too; we wait @stalled_seconds before deciding it's truly orphan.
+  defp cancel_unowned_batches do
+    cutoff = DateTime.add(DateTime.utc_now(), -@stalled_seconds, :second)
+
+    unowned =
+      from(b in Batch,
+        where:
+          is_nil(b.experiment_id) and
+            b.status in ["pending", "running"] and
+            (is_nil(b.master_polled_at) or b.master_polled_at < ^cutoff),
+        select: %{batch_id: b.id, env_name: b.env_name, inserted_at: b.inserted_at}
+      )
+      |> Repo.all()
+
+    Enum.each(unowned, fn %{batch_id: batch_id, env_name: env_name, inserted_at: inserted_at} ->
+      cancelled_jobs = cancel_chunks(batch_id)
+
+      from(b in Batch, where: b.id == ^batch_id)
+      |> Repo.update_all(
+        set: [status: "cancelled", completed_at: DateTime.utc_now()]
+      )
+
+      Logger.warning(
+        "[Reaper] cancelled #{cancelled_jobs} unowned chunks for batch #{batch_id} " <>
+          "(experiment_id=NULL, inserted_at=#{inserted_at})"
+      )
+
+      if cancelled_jobs > 0 do
+        Experiments.log_event!(
+          "warn",
+          "reaper",
+          "cancelled #{cancelled_jobs} unowned chunks for #{env_name || "unknown"} batch #{batch_id}",
+          env_name: env_name,
+          metadata: %{
+            "batch_id" => batch_id,
+            "reason" => "experiment_id_null_and_unpolled",
+            "cancelled_jobs" => cancelled_jobs,
+            "inserted_at" => inserted_at
+          }
+        )
+      end
     end)
   end
 

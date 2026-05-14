@@ -22,6 +22,14 @@ defmodule Server.Experiments do
 
   @stalled_threshold_seconds 300
 
+  # An iter that has been alive (heartbeat fresh) but accepted ZERO
+  # bits for this long is almost certainly bottlenecked on something
+  # — typically an undersized worker swarm, an unowned-batch backlog,
+  # or a misconfigured CEGAR run. Distinct from `stalled` (heartbeat
+  # dead → master crashed); this fires when the master is healthy
+  # but the WORK isn't moving.
+  @no_progress_threshold_seconds 60 * 60
+
   # ── Submission ──────────────────────────────────────────────
 
   @doc """
@@ -335,10 +343,19 @@ defmodule Server.Experiments do
       else: {"healthy", nil}
   end
 
-  defp compute_health(%Experiment{status: "running", updated_at: updated_at})
+  defp compute_health(%Experiment{status: "running", updated_at: updated_at} = exp)
        when not is_nil(updated_at) do
     secs = DateTime.diff(DateTime.utc_now(), updated_at, :second)
-    health = if secs > @stalled_threshold_seconds, do: "stalled", else: "healthy"
+    elapsed = elapsed_seconds(exp.started_at || exp.inserted_at) || 0
+    bits_done = length(exp.bit_progress || [])
+
+    health =
+      cond do
+        secs > @stalled_threshold_seconds -> "stalled"
+        bits_done == 0 and elapsed > @no_progress_threshold_seconds -> "no_progress"
+        true -> "healthy"
+      end
+
     {health, secs}
   end
 
