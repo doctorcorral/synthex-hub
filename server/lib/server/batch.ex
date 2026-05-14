@@ -28,6 +28,14 @@ defmodule Server.Batch do
     field :best_reward, :float
     field :baseline_reward, :float
 
+    # Streaming aggregates (Layer 1b of docs/streaming-cegar.md).
+    # Updated atomically on every chunk submit so SSE / dashboard
+    # can render live mean / stddev / rate without scanning results.
+    field :n_results, :integer, default: 0
+    field :sum_reward, :float
+    field :sum_sq_reward, :float
+    field :last_result_at, :utc_datetime_usec
+
     # Stamped on every `GET /api/master/batches/:id` so we can tell
     # whether the master is alive. Used by `experiments_summary/0`
     # to compute the `health` flag surfaced on the landing page.
@@ -60,6 +68,10 @@ defmodule Server.Batch do
       :ttl_at,
       :best_reward,
       :baseline_reward,
+      :n_results,
+      :sum_reward,
+      :sum_sq_reward,
+      :last_result_at,
       :master_polled_at,
       :experiment_id
     ])

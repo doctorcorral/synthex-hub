@@ -354,9 +354,23 @@ defmodule Server.Queue do
   #     candidate to its candidate list, so item 0 of chunk 0 IS
   #     the baseline reward.
   #
-  # No-ops cleanly for `collect_states` results (no `reward` field).
+  # Layer 1b additions (docs/streaming-cegar.md):
+  #
+  #   * `n_results`       — running count of candidate evaluations
+  #     rolled in, incremented by the number of rewardful items in
+  #     this chunk.
+  #   * `sum_reward`      — running sum, used together with `n_results`
+  #     to derive the live mean for SSE / dashboard.
+  #   * `sum_sq_reward`   — running sum of squares for live stddev.
+  #   * `last_result_at`  — wall-clock of this update, used by
+  #     `MetricsBroker` to compute "candidates / min" rates.
+  #
+  # All five columns are updated in one atomic SQL statement so
+  # concurrent chunk submits can't desync them. No-ops cleanly for
+  # `collect_states` results (no `reward` field → counts/sums = 0).
   defp maybe_update_score_summary(batch_id, cmd, chunk_index, results) do
     chunk_max = chunk_max_reward(results)
+    {chunk_n, chunk_sum, chunk_sum_sq} = chunk_reward_aggregates(results)
 
     baseline_reward =
       if cmd == "score_bit" and chunk_index == 0 do
@@ -366,24 +380,42 @@ defmodule Server.Queue do
         end
       end
 
-    if is_nil(chunk_max) and is_nil(baseline_reward) do
-      :ok
-    else
-      # Single UPDATE; either argument may be NULL and that side is
-      # left untouched. Atomic against concurrent chunk submissions.
-      sql = """
-      UPDATE batches
-      SET
-        best_reward = CASE
-          WHEN $1::float8 IS NULL THEN best_reward
-          ELSE GREATEST(COALESCE(best_reward, $1::float8), $1::float8)
-        END,
-        baseline_reward = COALESCE(baseline_reward, $2::float8)
-      WHERE id = $3
-      """
+    cond do
+      is_nil(chunk_max) and is_nil(baseline_reward) and chunk_n == 0 ->
+        :ok
 
-      Repo.query!(sql, [chunk_max, baseline_reward, batch_id])
-      :ok
+      true ->
+        # Single UPDATE; arguments that are NULL leave their column
+        # untouched. Atomic against concurrent chunk submissions.
+        sql = """
+        UPDATE batches
+        SET
+          best_reward = CASE
+            WHEN $1::float8 IS NULL THEN best_reward
+            ELSE GREATEST(COALESCE(best_reward, $1::float8), $1::float8)
+          END,
+          baseline_reward = COALESCE(baseline_reward, $2::float8),
+          n_results     = COALESCE(n_results, 0)     + $4::integer,
+          sum_reward    = COALESCE(sum_reward, 0.0)  + $5::float8,
+          sum_sq_reward = COALESCE(sum_sq_reward, 0.0) + $6::float8,
+          last_result_at = CASE
+            WHEN $4::integer = 0 THEN last_result_at
+            ELSE $7::timestamptz
+          END
+        WHERE id = $3
+        """
+
+        Repo.query!(sql, [
+          chunk_max,
+          baseline_reward,
+          batch_id,
+          chunk_n,
+          chunk_sum,
+          chunk_sum_sq,
+          DateTime.utc_now()
+        ])
+
+        :ok
     end
   end
 
@@ -401,6 +433,23 @@ defmodule Server.Queue do
   end
 
   defp chunk_max_reward(_), do: nil
+
+  # Count / sum / sum-of-squares over a chunk's rewards. Single pass
+  # so we don't traverse the list three times. Items without a
+  # numeric `reward` are ignored (e.g. `collect_states` results
+  # carry `states` / `success` instead).
+  defp chunk_reward_aggregates(results) when is_list(results) do
+    Enum.reduce(results, {0, 0.0, 0.0}, fn
+      %{"reward" => r}, {n, s, sq} when is_number(r) ->
+        rf = r * 1.0
+        {n + 1, s + rf, sq + rf * rf}
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp chunk_reward_aggregates(_), do: {0, 0.0, 0.0}
 
   # ── Worker registration ─────────────────────────────────────
 
