@@ -143,7 +143,7 @@ DEFAULT_DONATE_PCT=50
 # up under your name on the leaderboard).
 suggested_name="$(printf '%s@%s' "${USER:-anon}" "$(hostname 2>/dev/null | cut -d. -f1)")"
 
-if [ -z "${WORKER_NAME:-}" ] && [ -z "${NONINTERACTIVE:-}" ] && [ -t 0 ]; then
+if [ -z "${WORKER_NAME:-}" ] && [ -z "${NONINTERACTIVE:-}" ] && [ -r /dev/tty ]; then
   printf '\n%sChoose a display name for the public leaderboard.%s\n' "$C_BOLD" "$C_RESET" >&2
   printf '%s  · type a handle (e.g. "alice", "bob@univ")%s\n' "$C_DIM" "$C_RESET" >&2
   printf '%s  · press ENTER to use the suggested default%s\n' "$C_DIM" "$C_RESET" >&2
@@ -166,7 +166,7 @@ resolve_pool_size() {
   fi
 
   pct=""
-  if [ -z "${DONATE_PCT:-}" ] && [ -z "${NONINTERACTIVE:-}" ] && [ -t 0 ]; then
+    if [ -z "${DONATE_PCT:-}" ] && [ -z "${NONINTERACTIVE:-}" ] && [ -r /dev/tty ]; then
     printf '\n%sHow much of this machine to donate?%s\n' "$C_BOLD" "$C_RESET" >&2
     printf '%s  detected %s CPU cores. one python interpreter per donated core.%s\n' \
       "$C_DIM" "$TOTAL_CORES" "$C_RESET" >&2

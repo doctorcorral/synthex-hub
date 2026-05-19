@@ -10,20 +10,27 @@ defmodule Server.AggregateBroker do
 
   ## What's in a snapshot
 
+  Reward fields are *per-episode means* (the candidate score Σ over
+  n_episodes rollouts divided by n_episodes). Raw sums live alongside
+  under `*_sum` keys for API consumers who want the exact stored
+  value. See `Server.Experiments.normalize_reward/2`.
+
       %{
         experiments: [
           %{
             experiment_id: "…",
             env_name: "Ant-v5",
+            n_episodes: 30,
             active_bit: %{
               batch_id: "…",
               target_bit: 5,
               cmd: "score_bit",
               n_results: 318,
-              mean: -2980.1,
-              stddev: 145.2,
-              best_reward: -2820.4,
-              baseline_reward: -3002.2,
+              mean: -99.3,          # per episode
+              stddev: 4.8,
+              best_reward: -94.0,
+              baseline_reward: -100.1,
+              best_reward_sum: -2820.4,  # raw sum across 30 eps
               completed_chunks: 32,
               total_chunks: 60,
               progress: 0.533,
@@ -490,6 +497,11 @@ defmodule Server.AggregateBroker do
       select: %{
         experiment_id: b.experiment_id,
         env_name: e.env_name,
+        # Carry the experiment record through so `render_row/3` can
+        # ask `Experiments.n_episodes_for/1` for this experiment's
+        # rollout count and normalize summed rewards into per-episode
+        # means for the dashboard / SSE consumers.
+        experiment: e,
         batch_id: b.id,
         cmd: b.cmd,
         payload: b.payload,
@@ -511,15 +523,24 @@ defmodule Server.AggregateBroker do
     sum = row.sum_reward || 0.0
     sum_sq = row.sum_sq_reward || 0.0
 
-    mean = if n > 0, do: sum / n, else: nil
+    # Per-candidate stats are computed in the *summed* domain (each
+    # candidate's reward is itself Σ over n_episodes rollouts in the
+    # oracle). The dashboard speaks in per-episode means, so divide
+    # by n_episodes after computing variance to get honest μ and σ
+    # that match the per-episode best/baseline shown above. Stddev
+    # scales linearly with the divisor so this is just `σ / k`.
+    n_episodes = Experiments.n_episodes_for(row.experiment)
 
-    # Variance: E[X²] - (E[X])². Guard against tiny negatives from
-    # floating-point round-off (mathematically variance ≥ 0).
-    stddev =
-      if n > 1 and not is_nil(mean) do
-        var = sum_sq / n - mean * mean
+    sum_mean = if n > 0, do: sum / n, else: nil
+
+    sum_stddev =
+      if n > 1 and not is_nil(sum_mean) do
+        var = sum_sq / n - sum_mean * sum_mean
         if var > 0, do: :math.sqrt(var), else: 0.0
       end
+
+    mean = Experiments.normalize_reward(sum_mean, n_episodes)
+    stddev = Experiments.normalize_reward(sum_stddev, n_episodes)
 
     progress =
       cond do
@@ -548,6 +569,7 @@ defmodule Server.AggregateBroker do
     payload = %{
       experiment_id: row.experiment_id,
       env_name: row.env_name,
+      n_episodes: n_episodes,
       active_bit: %{
         batch_id: row.batch_id,
         target_bit: target_bit,
@@ -555,8 +577,14 @@ defmodule Server.AggregateBroker do
         n_results: n,
         mean: mean,
         stddev: stddev,
-        best_reward: row.best_reward,
-        baseline_reward: row.baseline_reward,
+        best_reward: Experiments.normalize_reward(row.best_reward, n_episodes),
+        baseline_reward: Experiments.normalize_reward(row.baseline_reward, n_episodes),
+        # Raw summed forms alongside, for API consumers who want the
+        # exact value as stored.
+        best_reward_sum: row.best_reward,
+        baseline_reward_sum: row.baseline_reward,
+        mean_sum: sum_mean,
+        stddev_sum: sum_stddev,
         completed_chunks: row.completed_chunks || 0,
         total_chunks: row.total_chunks || 0,
         progress: progress,
@@ -565,14 +593,19 @@ defmodule Server.AggregateBroker do
       policy_version: row.policy_version,
       latest_commits:
         Enum.map(commits, fn c ->
+          prev_mean = Experiments.normalize_reward(c.prev_reward, n_episodes)
+          new_mean = Experiments.normalize_reward(c.new_reward, n_episodes)
+
           %{
             version: c.version,
             bit_idx: c.bit_idx,
-            prev_reward: c.prev_reward,
-            new_reward: c.new_reward,
+            prev_reward: prev_mean,
+            new_reward: new_mean,
+            prev_reward_sum: c.prev_reward,
+            new_reward_sum: c.new_reward,
             delta:
-              if(is_number(c.new_reward) and is_number(c.prev_reward),
-                do: c.new_reward - c.prev_reward,
+              if(is_number(new_mean) and is_number(prev_mean),
+                do: new_mean - prev_mean,
                 else: nil
               ),
             committed_at: c.committed_at

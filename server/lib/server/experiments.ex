@@ -24,6 +24,15 @@ defmodule Server.Experiments do
   # Surfaces as `stalled` on the dashboard.
   @stalled_threshold_seconds 300
 
+  # Default rollout count per candidate when the experiment config
+  # doesn't specify one — mirrors
+  # `Server.Workers.ExperimentBootstrap.config_to_opts/1`. Used to
+  # normalize the *summed* reward stored in `Experiment.best_reward`
+  # (one number per candidate = Σ over n_episodes) back into a
+  # per-episode mean for the dashboard, which is what literature
+  # numbers and operator intuition expect.
+  @default_n_episodes 30
+
   # Heartbeat fresh AND there's an in-flight wave AND no chunks have
   # completed in this long → workers stopped pulling work even though
   # the master wants more. Surfaces as `idle` on the dashboard, the
@@ -253,9 +262,14 @@ defmodule Server.Experiments do
       completed = Enum.filter(exps, &(&1.status == "completed"))
       latest_completed = List.first(completed)
 
+      # Normalize each completed run's summed best_reward back to a
+      # per-episode mean using *its own* n_episodes (operators can
+      # change n_episodes between runs of the same env) before taking
+      # the max — comparing means across runs is honest, comparing
+      # sums is not.
       best_completed =
         completed
-        |> Enum.map(& &1.best_reward)
+        |> Enum.map(fn e -> normalize_reward(e.best_reward, n_episodes_for(e)) end)
         |> Enum.reject(&is_nil/1)
         |> case do
           [] -> nil
@@ -286,6 +300,7 @@ defmodule Server.Experiments do
     max_iters = get_int(config, "max_iters", 5)
     cegar_rounds = get_int(config, "cegar_rounds", 3)
     bits_per_dim = get_int(config, "bits_per_dim", 3)
+    n_episodes = n_episodes_for(exp)
 
     n_bits =
       try do
@@ -313,8 +328,14 @@ defmodule Server.Experiments do
       bits_done: length(exp.bit_progress || []),
       n_bits: n_bits,
       accepted_count: exp.accepted_count,
-      best_reward: exp.best_reward,
-      baseline_reward: exp.baseline_reward,
+      # Dashboard-facing scores are *per-episode means*. The raw sums
+      # live alongside for forensic / API consumers who want the
+      # exact value as stored. See `normalize_reward/2`.
+      best_reward: normalize_reward(exp.best_reward, n_episodes),
+      baseline_reward: normalize_reward(exp.baseline_reward, n_episodes),
+      best_reward_sum: exp.best_reward,
+      baseline_reward_sum: exp.baseline_reward,
+      n_episodes: n_episodes,
       progress: progress,
       started_at: exp.started_at || exp.inserted_at,
       elapsed_seconds: elapsed_seconds(exp.started_at || exp.inserted_at),
@@ -345,7 +366,7 @@ defmodule Server.Experiments do
       # commit counter + the last few commits so the dashboard can
       # show "v=12 — bit 3 +2.1 @ 14s ago" style live progress.
       policy_version: exp.policy_version || 0,
-      latest_commits: render_commits(latest_commits(exp.id, 5))
+      latest_commits: render_commits(latest_commits(exp.id, 5), n_episodes)
     }
   end
 
@@ -429,10 +450,15 @@ defmodule Server.Experiments do
   defp render_latest(nil), do: nil
 
   defp render_latest(%Experiment{} = exp) do
+    n_episodes = n_episodes_for(exp)
+
+    best_mean = normalize_reward(exp.best_reward, n_episodes)
+    baseline_mean = normalize_reward(exp.baseline_reward, n_episodes)
+
     delta =
       cond do
-        is_number(exp.best_reward) and is_number(exp.baseline_reward) ->
-          exp.best_reward - exp.baseline_reward
+        is_number(best_mean) and is_number(baseline_mean) ->
+          best_mean - baseline_mean
 
         true ->
           nil
@@ -440,8 +466,11 @@ defmodule Server.Experiments do
 
     %{
       experiment_id: exp.id,
-      best_reward: exp.best_reward,
-      baseline_reward: exp.baseline_reward,
+      best_reward: best_mean,
+      baseline_reward: baseline_mean,
+      best_reward_sum: exp.best_reward,
+      baseline_reward_sum: exp.baseline_reward,
+      n_episodes: n_episodes,
       delta: delta,
       accepted_count: exp.accepted_count,
       completed_at: exp.completed_at
@@ -630,12 +659,15 @@ defmodule Server.Experiments do
     |> Repo.all()
   end
 
-  defp render_commits(rows) do
+  defp render_commits(rows, n_episodes) do
     Enum.map(rows, fn row ->
+      prev_mean = normalize_reward(row.prev_reward, n_episodes)
+      new_mean = normalize_reward(row.new_reward, n_episodes)
+
       delta =
         cond do
-          is_number(row.new_reward) and is_number(row.prev_reward) ->
-            row.new_reward - row.prev_reward
+          is_number(new_mean) and is_number(prev_mean) ->
+            new_mean - prev_mean
 
           true ->
             nil
@@ -644,8 +676,11 @@ defmodule Server.Experiments do
       %{
         version: row.version,
         bit_idx: row.bit_idx,
-        prev_reward: row.prev_reward,
-        new_reward: row.new_reward,
+        prev_reward: prev_mean,
+        new_reward: new_mean,
+        prev_reward_sum: row.prev_reward,
+        new_reward_sum: row.new_reward,
+        n_episodes: n_episodes,
         delta: delta,
         committed_at: row.committed_at,
         committed_seconds_ago: elapsed_seconds(row.committed_at),
@@ -655,4 +690,33 @@ defmodule Server.Experiments do
       }
     end)
   end
+
+  # ── Reward normalization helpers ────────────────────────────
+
+  @doc """
+  Per-experiment `n_episodes` (rollouts per candidate), used to
+  convert summed candidate rewards stored in `Experiment.best_reward`
+  / `Batch.best_reward` / `PolicyVersion.new_reward` back into the
+  per-episode means that operators and literature numbers speak in.
+
+  Falls back to `@default_n_episodes` (30) when the config doesn't
+  set one. Guards against zero/negative so the divisor is always
+  safe.
+  """
+  def n_episodes_for(%Experiment{config: config}) do
+    case get_int(config || %{}, "n_episodes", @default_n_episodes) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_n_episodes
+    end
+  end
+
+  @doc """
+  Convert a summed reward (one number per candidate = Σ over
+  n_episodes) into a per-episode mean. Returns `nil` unchanged so
+  callers can pipe optional fields through without guarding.
+  """
+  def normalize_reward(nil, _n_episodes), do: nil
+  def normalize_reward(_value, n_episodes) when n_episodes <= 0, do: nil
+  def normalize_reward(value, n_episodes) when is_number(value), do: value / n_episodes
+  def normalize_reward(_value, _n_episodes), do: nil
 end
