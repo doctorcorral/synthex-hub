@@ -69,7 +69,7 @@ defmodule Server.AggregateBroker do
 
   import Ecto.Query
 
-  alias Server.{Batch, Experiment, Experiments, PolicyVersion, Repo}
+  alias Server.{Batch, EnvPolicy, Experiment, Experiments, PolicyVersion, Repo}
 
   @table :server_aggregate_cache
   @refresh_ms 1_000
@@ -327,34 +327,57 @@ defmodule Server.AggregateBroker do
   end
 
   # Per-experiment wave cutoff: max(experiment.started_at OR
-  # inserted_at, max(policy_versions.inserted_at)). Returns a map of
-  # experiment_id => NaiveDateTime. Experiments not yet started fall
-  # back to inserted_at. We do this in two roundtrips (experiments,
-  # policy_versions) which is fine — broker ticks once per second
-  # and these tables are small.
+  # inserted_at, max(policy_versions.inserted_at on this experiment's
+  # lineage)). Returns a map of experiment_id => NaiveDateTime.
+  # Experiments not yet started fall back to inserted_at.
+  #
+  # The lineage's commit history is the relevant boundary: a wave is
+  # "what's been dispatched since the policy last advanced". With the
+  # env_policy promotion, policy advances are keyed by env_policy_id
+  # not experiment_id, so we look up the experiment's env_policy_id
+  # first, then ask policy_versions for the latest commit on each
+  # lineage.
   defp wave_cutoffs(experiment_ids) do
-    exp_starts =
+    exp_rows =
       from(e in Experiment,
         where: e.id in ^experiment_ids,
-        select: {e.id, e.started_at, e.inserted_at}
+        select: {e.id, e.env_policy_id, e.started_at, e.inserted_at}
       )
       |> Repo.all()
-      |> Map.new(fn {id, started_at, inserted_at} ->
+
+    exp_starts =
+      Map.new(exp_rows, fn {id, _ep_id, started_at, inserted_at} ->
         {id, started_at || inserted_at}
       end)
 
-    last_commits =
-      from(v in PolicyVersion,
-        where: v.experiment_id in ^experiment_ids,
-        group_by: v.experiment_id,
-        select: {v.experiment_id, max(v.inserted_at)}
-      )
-      |> Repo.all()
-      |> Map.new()
+    env_policy_for_exp =
+      Map.new(exp_rows, fn {id, ep_id, _, _} -> {id, ep_id} end)
+
+    env_policy_ids =
+      exp_rows
+      |> Enum.map(fn {_, ep_id, _, _} -> ep_id end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    last_commits_per_lineage =
+      case env_policy_ids do
+        [] ->
+          %{}
+
+        ids ->
+          from(v in PolicyVersion,
+            where: v.env_policy_id in ^ids,
+            group_by: v.env_policy_id,
+            select: {v.env_policy_id, max(v.inserted_at)}
+          )
+          |> Repo.all()
+          |> Map.new()
+      end
 
     Enum.reduce(experiment_ids, %{}, fn id, acc ->
       start_ts = Map.get(exp_starts, id)
-      commit_ts = Map.get(last_commits, id)
+      ep_id = Map.get(env_policy_for_exp, id)
+      commit_ts = ep_id && Map.get(last_commits_per_lineage, ep_id)
 
       case {start_ts, commit_ts} do
         {nil, nil} -> acc
@@ -493,6 +516,8 @@ defmodule Server.AggregateBroker do
           l.latest_inserted_at == b.inserted_at,
       join: e in Experiment,
       on: e.id == b.experiment_id,
+      left_join: p in EnvPolicy,
+      on: p.id == e.env_policy_id,
       where: b.status in ["pending", "running"] and e.status == "running",
       select: %{
         experiment_id: b.experiment_id,
@@ -502,6 +527,12 @@ defmodule Server.AggregateBroker do
         # rollout count and normalize summed rewards into per-episode
         # means for the dashboard / SSE consumers.
         experiment: e,
+        # The lineage's current version is the source of truth for
+        # `policy_version`; the dashboard's "v=N" reads from here.
+        # Also stash env_policy_id so commit-log lookups go through
+        # the lineage rather than the session.
+        env_policy_id: e.env_policy_id,
+        env_policy: p,
         batch_id: b.id,
         cmd: b.cmd,
         payload: b.payload,
@@ -512,7 +543,7 @@ defmodule Server.AggregateBroker do
         baseline_reward: b.baseline_reward,
         completed_chunks: b.completed_chunks,
         total_chunks: b.total_chunks,
-        policy_version: e.policy_version
+        policy_version: p.policy_version
       }
     )
     |> Repo.all()
@@ -562,9 +593,15 @@ defmodule Server.AggregateBroker do
     # Streaming-CEGAR §Layer 3 surface: piggyback the most recent
     # commits on each active-experiment frame so the dashboard
     # can light up a "v=N — bit 3 +2.1" strip without opening a
-    # second SSE stream. Two reads per refresh per active row;
-    # `latest_commits/2` is indexed on (experiment_id, version).
-    commits = Experiments.latest_commits(row.experiment_id, 5)
+    # second SSE stream. The commit log is keyed by lineage
+    # (env_policy_id), so an experiment that just inherited a
+    # multi-commit policy immediately surfaces the lineage's
+    # history rather than starting empty.
+    commits =
+      case row.env_policy_id do
+        nil -> []
+        ep_id -> Experiments.latest_commits_for_lineage(ep_id, 5)
+      end
 
     payload = %{
       experiment_id: row.experiment_id,

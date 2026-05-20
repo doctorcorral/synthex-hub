@@ -2,25 +2,30 @@ defmodule Server.Experiments do
   @moduledoc """
   Data-access layer for `Server.Experiment` rows.
 
-  Everything the master-loop Oban workers and the public landing page
-  need to read or write about an experiment lives here. Pulled out
-  into its own module to keep `Server.Queue` focused on the
-  batch/chunk lifecycle.
+  Experiments are now *sessions* — the policy itself lives on
+  `Server.EnvPolicy` (the lineage, owned per `(env_name, config_sig)`).
+  This module focuses on the session lifecycle (create, start, mark
+  terminal) and on the per-(env, sig) dashboard summary that joins
+  sessions to their lineage.
 
-  Two consumers:
+  Three consumers:
 
-    * The `Server.Workers.Experiment*` Oban workers, which checkpoint
-      after every accepted bit via `update_state/2` and `mark_*` —
-      a crashed/retried worker resumes from the persisted state.
+    * `Server.Workers.Experiment*` Oban workers, which read/write
+      session state via the helpers here.
 
     * Read APIs: the router (POST submission, GET status) and the
       landing page (rolling summary, incidents banner).
+
+    * `Server.AggregateBroker`, which fetches lightweight session
+      records to render the streaming SSE feed.
   """
 
   import Ecto.Query
-  alias Server.{AggregateBroker, Experiment, PolicyVersion, Repo, SystemEvent}
+  alias Server.{AggregateBroker, EnvPolicies, EnvPolicy, Experiment,
+                PolicyVersion, Repo, SystemEvent}
+  alias Server.EnvPolicy.ConfigSig
 
-  # Heartbeat dead → master Oban job has crashed/disappeared.
+  # Heartbeat dead → controller Oban job has crashed/disappeared.
   # Surfaces as `stalled` on the dashboard.
   @stalled_threshold_seconds 300
 
@@ -29,40 +34,39 @@ defmodule Server.Experiments do
   # `Server.Workers.ExperimentBootstrap.config_to_opts/1`. Used to
   # normalize the *summed* reward stored in `Experiment.best_reward`
   # (one number per candidate = Σ over n_episodes) back into a
-  # per-episode mean for the dashboard, which is what literature
-  # numbers and operator intuition expect.
+  # per-episode mean for the dashboard.
   @default_n_episodes 30
 
   # Heartbeat fresh AND there's an in-flight wave AND no chunks have
   # completed in this long → workers stopped pulling work even though
-  # the master wants more. Surfaces as `idle` on the dashboard, the
-  # honest "something is wrong, please look" signal. Distinct from
-  # `slow` (work is flowing, just very slowly relative to bit size).
+  # the controller wants more. Surfaces as `idle` on the dashboard.
   @idle_threshold_seconds 5 * 60
 
   # First few minutes after a wave is dispatched there will legitimately
-  # be no chunk completions yet — workers need to fetch their first
-  # chunk over HTTP, finish the rollouts, and post the result.
-  # Don't flag `idle` until we're past this grace period.
+  # be no chunk completions yet.
   @boot_grace_seconds 5 * 60
 
   # Heartbeat fresh AND chunks ARE flowing but the swarm is so far
   # below the workload's bit granularity that no bit will be accepted
-  # for ages. Surfaces as `slow` on the dashboard with an ETA, not
-  # as a red alarm. Replaces the older `no_progress` flag which fired
-  # purely on wall-clock and was wildly misleading on Ant-scale runs
-  # where a single bit legitimately takes days to complete.
+  # for ages. Surfaces as `slow` on the dashboard.
   @slow_after_seconds 60 * 60
 
   # ── Submission ──────────────────────────────────────────────
 
   @doc """
-  Create a new experiment and enqueue its bootstrap job. Rejects if
-  there's already a pending/running row for the same env (one
-  experiment at a time per env — operators can launch a second
-  Ant run only after the first finishes or fails). The unique
-  index `experiments_one_active_per_env` enforces this at the
-  database level so a racing submit can't slip through.
+  Create a new experiment session and enqueue its bootstrap job.
+
+  Per the env_policies promotion: two submissions for the same
+  `env_name` with DIFFERENT `config_sig`s run in parallel (different
+  lineages); two with the SAME `config_sig` collide on the partial
+  unique index `experiments_one_active_per_env_policy`.
+
+  We compute the sig client-side (without touching env_policies yet —
+  bootstrap does the upsert) and pre-check for an active session on
+  the same lineage to fail fast with a clean 409 rather than waiting
+  for the partial unique index to bite, because the index can't
+  conflict until bootstrap has set the experiment row's
+  `env_policy_id`.
 
   Returns `{:ok, experiment}` or `{:error, reason}`.
   """
@@ -73,37 +77,14 @@ defmodule Server.Experiments do
 
     case validate_create_attrs(attrs) do
       :ok ->
-        Repo.transaction(fn ->
-          changeset = Experiment.changeset(%Experiment{}, attrs)
+        config = Map.get(attrs, "config") || %{}
+        {sig, _canonical} = ConfigSig.sig_for_config(config)
+        env_name = Map.get(attrs, "env_name")
 
-          case Repo.insert(changeset) do
-            {:ok, experiment} ->
-              case Server.Workers.ExperimentBootstrap.new(%{"experiment_id" => experiment.id})
-                   |> Oban.insert() do
-                {:ok, _job} ->
-                  log_event!("info", "master",
-                    "experiment submitted: #{experiment.env_name} (#{experiment.id})",
-                    env_name: experiment.env_name,
-                    experiment_id: experiment.id
-                  )
-
-                  experiment
-
-                {:error, reason} ->
-                  Repo.rollback({:enqueue_failed, reason})
-              end
-
-            {:error, %Ecto.Changeset{errors: errors}} ->
-              if active_conflict?(errors) do
-                Repo.rollback(:already_running)
-              else
-                Repo.rollback({:invalid, errors})
-              end
-          end
-        end)
-        |> case do
-          {:ok, experiment} -> {:ok, experiment}
-          {:error, reason} -> {:error, reason}
+        if active_for_sig?(env_name, sig) do
+          {:error, :already_running}
+        else
+          do_insert_experiment(attrs)
         end
 
       {:error, reason} ->
@@ -111,17 +92,54 @@ defmodule Server.Experiments do
     end
   end
 
-  # Did the insert fail because of the partial unique index on
-  # active (pending/running) experiments per env? Errors come back
-  # as `{message, opts}` tuples from `unique_constraint/3`.
-  defp active_conflict?(errors) do
-    case Keyword.get(errors, :env_name) do
-      {_msg, opts} ->
-        Keyword.get(opts, :constraint_name) == "experiments_one_active_per_env" or
-          Keyword.get(opts, :constraint) == :unique
+  defp do_insert_experiment(attrs) do
+    Repo.transaction(fn ->
+      changeset = Experiment.changeset(%Experiment{}, attrs)
 
-      _ ->
+      case Repo.insert(changeset) do
+        {:ok, experiment} ->
+          case Server.Workers.ExperimentBootstrap.new(%{"experiment_id" => experiment.id})
+               |> Oban.insert() do
+            {:ok, _job} ->
+              log_event!("info", "master",
+                "experiment submitted: #{experiment.env_name} (#{experiment.id})",
+                env_name: experiment.env_name,
+                experiment_id: experiment.id
+              )
+
+              experiment
+
+            {:error, reason} ->
+              Repo.rollback({:enqueue_failed, reason})
+          end
+
+        {:error, %Ecto.Changeset{errors: errors}} ->
+          Repo.rollback({:invalid, errors})
+      end
+    end)
+    |> case do
+      {:ok, experiment} -> {:ok, experiment}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Pre-check: is there an active (pending/running) session for this
+  # `(env_name, sig)`? We resolve the lineage row first; if it exists
+  # AND has an active session attached, reject. If it doesn't exist
+  # OR exists but has no active session, the partial unique index
+  # picks up the slack post-bootstrap.
+  defp active_for_sig?(env_name, sig) do
+    case Repo.get_by(EnvPolicy, env_name: env_name, config_sig: sig) do
+      nil ->
         false
+
+      %EnvPolicy{id: env_policy_id} ->
+        from(e in Experiment,
+          where:
+            e.env_policy_id == ^env_policy_id and
+              e.status in ["pending", "running"]
+        )
+        |> Repo.exists?()
     end
   end
 
@@ -141,9 +159,6 @@ defmodule Server.Experiments do
   end
 
   defp validate_create_attrs(%{"env_key" => env_key}) do
-    # Round-trip via Atom.to_string/1 rather than to_existing_atom —
-    # safer on a cold BEAM where Synthex.Gym.Mujoco's `:ant` etc.
-    # haven't been added to the atom table yet by any caller.
     Code.ensure_loaded(Synthex.Gym.Mujoco)
 
     Synthex.Gym.Mujoco.known_envs()
@@ -165,43 +180,15 @@ defmodule Server.Experiments do
   end
 
   @doc """
-  Update an experiment's state. Used by workers to checkpoint
-  after every accepted bit and after every iter advance.
+  Update an experiment's session state. Used by workers to
+  checkpoint after CEGAR-step advances and to transition status.
+  Note: this no longer touches predicates / policy_version — those
+  live on the env_policy and are mutated only via `Server.CommitGate`.
   """
   def update_state(%Experiment{} = exp, attrs) do
     exp
     |> Experiment.changeset(attrs)
     |> Repo.update()
-  end
-
-  @doc """
-  Bump the cached `best_reward`/`accepted_count` atomically. Called
-  after each accepted bit. Avoids a read-modify-write race with
-  concurrent reads from the public dashboard.
-  """
-  def record_acceptance(%Experiment{id: id}, reward) do
-    sql = """
-    UPDATE experiments
-    SET best_reward = GREATEST(COALESCE(best_reward, $1::float8), $1::float8),
-        accepted_count = accepted_count + 1,
-        updated_at = now()
-    WHERE id = $2
-    """
-
-    Repo.query!(sql, [reward * 1.0, Ecto.UUID.dump!(id)])
-    :ok
-  end
-
-  @doc """
-  Transition an experiment to "running" with baseline reward set.
-  Called by `ExperimentBootstrap` once initial validation succeeds.
-  """
-  def mark_running(%Experiment{} = exp, baseline_reward) do
-    update_state(exp, %{
-      "status" => "running",
-      "started_at" => exp.started_at || DateTime.utc_now(),
-      "baseline_reward" => baseline_reward
-    })
   end
 
   @doc "Transition an experiment to completed."
@@ -242,82 +229,80 @@ defmodule Server.Experiments do
   # ── Public dashboard ────────────────────────────────────────
 
   @doc """
-  Per-environment summary for the public landing page.
+  Per-lineage summary for the public landing page. One row per
+  `(env_name, config_sig)` — a card.
 
-  Reads directly from the `experiments` table — no more
-  reverse-engineering experiment shape from per-bit Batch rows
-  (which always lagged reality and routinely showed the wrong
-  liveness state). Each row carries the canonical CEGAR
-  progress, current best reward, and health.
+  Each card surfaces:
 
-  Returns `[%{env_name, status, active, latest, ...}, ...]`.
+    * The lineage's all-time best reward (env_policy.best_reward),
+      the canonical "current best" since the lineage IS the policy.
+      No more "ALL-TIME vs current run" gymnastics — they're the
+      same number.
+
+    * The active session attached to the lineage (if any), plus its
+      progress and health.
+
+    * The most recent terminal session on the lineage, with status
+      and per-session delta, for context on what the last attempt did.
+
+  Returns `[%{env_name, config_sig, status, active, last_run, ...}, ...]`.
   """
   def summary do
-    experiments = Repo.all(from e in Experiment, order_by: [desc: e.inserted_at])
+    env_policies = EnvPolicies.list_all()
 
-    by_env = Enum.group_by(experiments, & &1.env_name)
+    # Pre-fetch all sessions, group by env_policy_id once.
+    by_lineage =
+      Repo.all(
+        from e in Experiment,
+          where: not is_nil(e.env_policy_id),
+          order_by: [desc: e.inserted_at]
+      )
+      |> Enum.group_by(& &1.env_policy_id)
 
-    Enum.map(by_env, fn {env_name, exps} ->
-      active = Enum.find(exps, &(&1.status in ["pending", "running"]))
-      completed = Enum.filter(exps, &(&1.status == "completed"))
-      latest_completed = List.first(completed)
-
-      # The "last run" is the most-recent terminal experiment for
-      # this env, regardless of whether it finished cleanly. A
-      # `failed` or `cancelled` row with `accepted_count > 0` still
-      # produced real policy commits (each ran through `CommitGate`'s
-      # atomic transaction before the controller died); previously
-      # we hid those as `history` with `null` everywhere, which
-      # silently buried successful work whenever the controller's
-      # Oban supervisor ran out of retries (e.g. HalfCheetah finishing
-      # step 1/3 with 19 accepted bits, then OOM-killed mid-snooze).
-      last_run =
-        exps
-        |> Enum.reject(&(&1.status in ["pending", "running"]))
-        |> List.first()
-
-      # All-time best across runs that produced *any* accepted bit
-      # — completed and incomplete alike. A controller crash after
-      # 19 good commits is still 19 good commits; the policy
-      # artefact at that best_reward existed at some point and is
-      # comparable to a cleanly-completed run. Normalize each row by
-      # *its own* n_episodes (operators can change it between runs of
-      # the same env) before taking the max — comparing means across
-      # runs is honest, comparing sums is not.
-      best_so_far =
-        exps
-        |> Enum.filter(fn e ->
-          is_integer(e.accepted_count) and e.accepted_count > 0 and is_number(e.best_reward)
-        end)
-        |> Enum.map(fn e -> normalize_reward(e.best_reward, n_episodes_for(e)) end)
-        |> Enum.reject(&is_nil/1)
-        |> case do
-          [] -> nil
-          xs -> Enum.max(xs)
-        end
-
-      %{
-        env_name: env_name,
-        status:
-          cond do
-            active -> active.status
-            last_run -> last_run.status
-            true -> "history"
-          end,
-        active: render_active(active),
-        latest: render_latest(latest_completed),
-        last_run: render_last_run(last_run),
-        best_reward: best_so_far,
-        completed_count: length(completed),
-        total_count: length(exps)
-      }
-    end)
-    |> Enum.sort_by(& &1.env_name)
+    env_policies
+    |> Enum.map(&render_lineage(&1, Map.get(by_lineage, &1.id, [])))
+    |> Enum.sort_by(fn row -> {row.env_name, row.config_sig} end)
   end
 
-  defp render_active(nil), do: nil
+  defp render_lineage(%EnvPolicy{} = env_policy, sessions) do
+    active = Enum.find(sessions, &(&1.status in ["pending", "running"]))
+    completed = Enum.filter(sessions, &(&1.status == "completed"))
+    latest_completed = List.first(completed)
 
-  defp render_active(%Experiment{} = exp) do
+    last_run = Enum.find(sessions, &(&1.status not in ["pending", "running"]))
+
+    %{
+      env_name: env_policy.env_name,
+      env_key: env_policy.env_key,
+      config_sig: env_policy.config_sig,
+      config_summary: ConfigSig.summary(env_policy.config_data || %{}),
+      config_data: env_policy.config_data,
+      policy_version: env_policy.policy_version,
+      n_episodes: env_policy.n_episodes || @default_n_episodes,
+      # The lineage IS the all-time-best policy. Normalize to per-episode.
+      best_reward: normalize_reward(env_policy.best_reward, env_policy.n_episodes || @default_n_episodes),
+      best_reward_sum: env_policy.best_reward,
+      baseline_reward: normalize_reward(env_policy.baseline_reward, env_policy.n_episodes || @default_n_episodes),
+      baseline_reward_sum: env_policy.baseline_reward,
+      lineage_first_seen_at: env_policy.first_seen_at,
+      lineage_updated_at: env_policy.updated_at,
+      status:
+        cond do
+          active -> active.status
+          last_run -> last_run.status
+          true -> "history"
+        end,
+      active: render_active(active, env_policy),
+      latest: render_latest(latest_completed, env_policy),
+      last_run: render_last_run(last_run, env_policy),
+      completed_count: length(completed),
+      total_count: length(sessions)
+    }
+  end
+
+  defp render_active(nil, _env_policy), do: nil
+
+  defp render_active(%Experiment{} = exp, %EnvPolicy{} = env_policy) do
     config = exp.config || %{}
     max_iters = get_int(config, "max_iters", 5)
     cegar_rounds = get_int(config, "cegar_rounds", 3)
@@ -347,12 +332,11 @@ defmodule Server.Experiments do
       total_cegar_iters: cegar_rounds,
       iter: exp.current_iter,
       total_iters: max_iters,
-      bits_done: length(exp.bit_progress || []),
       n_bits: n_bits,
       accepted_count: exp.accepted_count,
-      # Dashboard-facing scores are *per-episode means*. The raw sums
-      # live alongside for forensic / API consumers who want the
-      # exact value as stored. See `normalize_reward/2`.
+      # Per-episode means for display. Raw sums alongside for forensic
+      # / API consumers. Session-scoped values; for the lineage's
+      # all-time best look at the top-level `best_reward`.
       best_reward: normalize_reward(exp.best_reward, n_episodes),
       baseline_reward: normalize_reward(exp.baseline_reward, n_episodes),
       best_reward_sum: exp.best_reward,
@@ -363,59 +347,23 @@ defmodule Server.Experiments do
       elapsed_seconds: elapsed_seconds(exp.started_at || exp.inserted_at),
       health: health,
       heartbeat_seconds_ago: polled_ago,
-      # Chunk-flow telemetry — the swarm's collective throughput on
-      # this experiment, summed across in-flight bits. Surfaces on
-      # the dashboard as "~N chunks/min · K pending · ETA D days"
-      # so an operator can see at a glance whether `slow` reflects
-      # an undersized swarm (workload >> capacity) or a real outage.
       chunks_per_min: flow && flow.chunks_per_min,
       chunks_done: flow && flow.chunks_done,
       chunks_total: flow && flow.chunks_total,
       chunks_pending: flow && flow.chunks_pending,
       n_active_bits: flow && flow.n_active_bits,
-      # Wave-scoped projection: how long until every bit in the
-      # current wave finishes its D0+D1 evaluation. With strict
-      # monotonicity in `Server.CommitGate` this is also the ETA
-      # to the next visible commit on the dashboard (at most one
-      # commit per wave under the current Jacobi-dispatch + serial
-      # post-commit pattern — see docs/streaming-cegar.md §Layer 3
-      # for the architectural fix to that).
       eta_wave_seconds: eta_wave_seconds(flow, n_bits),
       wave_dispatched_chunks: flow && flow.wave_dispatched_chunks,
       wave_done_chunks: flow && flow.wave_done_chunks,
       wave_total_chunks_estimate: wave_total_chunks_estimate(flow, n_bits),
-      # Streaming CEGAR §Layer 3 surface: monotonically-increasing
-      # commit counter + the last few commits so the dashboard can
-      # show "v=12 — bit 3 +2.1 @ 14s ago" style live progress.
-      policy_version: exp.policy_version || 0,
-      latest_commits: render_commits(latest_commits(exp.id, 5), n_episodes)
+      # Lineage version is the source of truth — surface it on the active
+      # session's payload so the dashboard's "v=N" reflects the lineage,
+      # not a session-scoped counter.
+      policy_version: env_policy.policy_version,
+      latest_commits: render_commits(latest_commits_for_lineage(env_policy.id, 5), n_episodes)
     }
   end
 
-  # Projected wall-clock to **wave completion** at the current swarm
-  # rate. Returns nil when we lack a reliable rate (between waves,
-  # just after a commit, or no in-flight batches yet).
-  #
-  # Why not just `chunks_pending / chunks_per_min`?
-  #
-  # Because each bit in `Synthex.Gym.Mujoco.optimize_bit` produces
-  # TWO `score_bit` batches (depth-0 atomic search + depth-1 compound
-  # refine), and `Task.async_stream` only keeps `bit_concurrency`
-  # bits in flight at a time. The "in-flight only" `chunks_pending`
-  # cycles every few hours as bit-groups churn through D0/D1, so
-  # `pending / rate` reads "a few hours" forever even when the true
-  # wall-clock to wave completion is days. That's the bug the user
-  # caught on HalfCheetah ("has been saying it's going to finish in
-  # some hours since some days").
-  #
-  # The honest answer: project the **whole wave**. Take what's been
-  # dispatched + completed so far in the wave (`wave_dispatched_chunks`)
-  # and add the empirical-per-bit estimate for the bits that haven't
-  # been dispatched yet. Divide by the rate. The estimate is
-  # constructed to stay roughly monotone within a wave — it might
-  # tick up by 10% as more bits dispatch and the empirical-per-bit
-  # estimate sharpens, but it can't oscillate by orders of magnitude
-  # the way `pending / rate` does.
   defp eta_wave_seconds(nil, _n_bits), do: nil
 
   defp eta_wave_seconds(%{chunks_per_min: rate} = flow, n_bits)
@@ -433,21 +381,6 @@ defmodule Server.Experiments do
 
   defp eta_wave_seconds(_, _), do: nil
 
-  # Estimate the total chunks for the *whole* current wave (all
-  # n_bits × D0+D1), even for bits the controller hasn't dispatched
-  # yet. Strategy:
-  #
-  #   * Empirical per-bit cost: `wave_dispatched_chunks /
-  #     wave_dispatched_bits`. For partially-dispatched bits (D0
-  #     done, D1 not yet) this *under*estimates the true cost; that
-  #     only makes the ETA slightly optimistic, never alarmist.
-  #
-  #   * Fallback when nothing has dispatched yet: nil, so the
-  #     caller falls through to no-ETA.
-  #
-  #   * If `n_bits` is unknown (env config unavailable for some
-  #     reason), fall back to just the dispatched chunks — the ETA
-  #     will be valid for what's currently dispatched at least.
   defp wave_total_chunks_estimate(nil, _n_bits), do: nil
 
   defp wave_total_chunks_estimate(%{wave_dispatched_chunks: dispatched, wave_dispatched_bits: n_disp},
@@ -457,27 +390,18 @@ defmodule Server.Experiments do
 
     case n_bits do
       n when is_integer(n) and n > n_disp ->
-        # Project: known-dispatched chunks + remaining bits × per-bit avg.
         dispatched + round((n - n_disp) * per_bit)
 
       _ ->
-        # All bits already dispatched (or n_bits unknown) — what's
-        # dispatched is the whole wave. Cast to integer for callers.
         dispatched
     end
   end
 
   defp wave_total_chunks_estimate(_flow, _n_bits), do: nil
 
-  # Render *any* most-recent terminal run (completed, failed, or
-  # cancelled). Unlike `render_latest/1` this doesn't hide non-clean
-  # exits — it returns the run's status alongside the achievement so
-  # the dashboard can show "stopped at v=19, best=2193 (controller
-  # killed)" instead of pretending the run never happened. Returns
-  # nil only when the env has no terminal runs at all.
-  defp render_last_run(nil), do: nil
+  defp render_last_run(nil, _env_policy), do: nil
 
-  defp render_last_run(%Experiment{} = exp) do
+  defp render_last_run(%Experiment{} = exp, _env_policy) do
     n_episodes = n_episodes_for(exp)
 
     best_mean = normalize_reward(exp.best_reward, n_episodes)
@@ -507,9 +431,9 @@ defmodule Server.Experiments do
     }
   end
 
-  defp render_latest(nil), do: nil
+  defp render_latest(nil, _env_policy), do: nil
 
-  defp render_latest(%Experiment{} = exp) do
+  defp render_latest(%Experiment{} = exp, _env_policy) do
     n_episodes = n_episodes_for(exp)
 
     best_mean = normalize_reward(exp.best_reward, n_episodes)
@@ -537,36 +461,6 @@ defmodule Server.Experiments do
     }
   end
 
-  # Liveness for an experiment, in four mutually-exclusive states:
-  #
-  #   * `stalled`  — the master Oban job hasn't checkpointed for
-  #                  `@stalled_threshold_seconds`. The controller
-  #                  itself has crashed/disappeared; Lifeline will
-  #                  rescue it. Red.
-  #
-  #   * `idle`     — master heartbeat is fresh AND there's an
-  #                  in-flight wave AND no chunks have completed in
-  #                  the last `@idle_threshold_seconds`. The
-  #                  controller is alive but workers stopped
-  #                  pulling/finishing work — most often a worker
-  #                  outage or a backed-up `chunks` queue. Orange.
-  #
-  #   * `slow`     — master alive, chunks ARE flowing, but the
-  #                  experiment has been running for
-  #                  `@slow_after_seconds` without accepting a bit.
-  #                  Workload bigger than the swarm can crunch in a
-  #                  reasonable time. Honest yellow signal, with an
-  #                  ETA so the operator can decide whether to grow
-  #                  the swarm or shrink the workload. NOT an error.
-  #
-  #   * `healthy`  — anything else: chunks moving, or bits being
-  #                  committed at a reasonable cadence, or the run
-  #                  is still inside its boot grace.
-  #
-  # The flow stats come from `Server.AggregateBroker` which refreshes
-  # once per second; `nil` flow means the broker hasn't observed an
-  # in-flight batch for this experiment yet (just-submitted or
-  # between waves while collect_states/build_features runs).
   defp compute_health(%Experiment{status: "pending"} = exp, _flow) do
     age = elapsed_seconds(exp.inserted_at) || 0
 
@@ -579,7 +473,6 @@ defmodule Server.Experiments do
        when not is_nil(updated_at) do
     secs = DateTime.diff(DateTime.utc_now(), updated_at, :second)
     elapsed = elapsed_seconds(exp.started_at || exp.inserted_at) || 0
-    bits_done = length(exp.bit_progress || [])
 
     health =
       cond do
@@ -589,7 +482,7 @@ defmodule Server.Experiments do
         elapsed > @boot_grace_seconds and chunks_stuck?(flow) ->
           "idle"
 
-        bits_done == 0 and elapsed > @slow_after_seconds and chunks_flowing?(flow) ->
+        (exp.accepted_count || 0) == 0 and elapsed > @slow_after_seconds and chunks_flowing?(flow) ->
           "slow"
 
         true ->
@@ -601,12 +494,6 @@ defmodule Server.Experiments do
 
   defp compute_health(_exp, _flow), do: {"unknown", nil}
 
-  # Is the swarm actively making chunk-level progress right now?
-  # Two signals must agree: (a) AggregateBroker has observed >0
-  # chunks/min over the rolling window, OR (b) `last_result_at`
-  # bumped within the idle threshold. Either is enough — the rolling
-  # rate can read 0 transiently between chunk arrivals on a sparse
-  # swarm, and `last_result_at` covers that case directly.
   defp chunks_flowing?(nil), do: false
 
   defp chunks_flowing?(%{chunks_per_min: rate, last_progress_at: last})
@@ -615,8 +502,6 @@ defmodule Server.Experiments do
 
   defp chunks_flowing?(%{last_progress_at: last}), do: not stale_progress?(last)
 
-  # No pending chunks → not "stuck", just between waves.
-  # Pending chunks but no recent completions → genuinely stuck.
   defp chunks_stuck?(nil), do: false
   defp chunks_stuck?(%{chunks_pending: pending}) when not is_integer(pending) or pending <= 0,
     do: false
@@ -690,20 +575,20 @@ defmodule Server.Experiments do
   # ── Streaming CEGAR commit log ────────────────────────────────
 
   @doc """
-  Most-recent commit-gate accepts for an experiment, newest first.
-  Used by:
+  Most-recent commit-gate accepts for a lineage, newest first. Used
+  by:
 
-    * `render_active/1` — to surface the last few commits on the
+    * `render_active/2` — to surface the last few commits on the
       dashboard card.
     * `Server.AggregateBroker` — to fan-out commit events via SSE.
 
   The `predicates` blob is NOT returned (it's the full policy state,
-  too heavy for a frequent SSE tick). Use `Server.Experiment.get/1`
+  too heavy for a frequent SSE tick). Use `Server.EnvPolicies.get/1`
   + `policy_versions` joins for full audit replay.
   """
-  def latest_commits(experiment_id, limit \\ 5) do
+  def latest_commits_for_lineage(env_policy_id, limit \\ 5) do
     from(v in PolicyVersion,
-      where: v.experiment_id == ^experiment_id,
+      where: v.env_policy_id == ^env_policy_id,
       order_by: [desc: v.version],
       limit: ^limit,
       select: %{
@@ -713,6 +598,7 @@ defmodule Server.Experiments do
         new_reward: v.new_reward,
         worker_id: v.worker_id,
         committed_at: v.inserted_at,
+        committed_by_experiment_id: v.experiment_id,
         metadata: v.metadata
       }
     )
@@ -745,6 +631,7 @@ defmodule Server.Experiments do
         committed_at: row.committed_at,
         committed_seconds_ago: elapsed_seconds(row.committed_at),
         worker_id: row.worker_id,
+        committed_by_experiment_id: row.committed_by_experiment_id,
         cegar_iter: Map.get(row.metadata || %{}, "cegar_iter"),
         wave: Map.get(row.metadata || %{}, "wave")
       }
@@ -755,13 +642,10 @@ defmodule Server.Experiments do
 
   @doc """
   Per-experiment `n_episodes` (rollouts per candidate), used to
-  convert summed candidate rewards stored in `Experiment.best_reward`
-  / `Batch.best_reward` / `PolicyVersion.new_reward` back into the
-  per-episode means that operators and literature numbers speak in.
+  convert summed candidate rewards into per-episode means.
 
   Falls back to `@default_n_episodes` (30) when the config doesn't
-  set one. Guards against zero/negative so the divisor is always
-  safe.
+  set one. Guards against zero/negative.
   """
   def n_episodes_for(%Experiment{config: config}) do
     case get_int(config || %{}, "n_episodes", @default_n_episodes) do

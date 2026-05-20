@@ -231,8 +231,10 @@ defmodule Server.Router do
 
   # Submit a new experiment. The hub spawns an Oban-supervised
   # master loop that runs CEGAR end-to-end on the server, checkpointing
-  # after every accepted bit. No more "ssh to my laptop and
-  # `nohup elixir ...exs`" pattern.
+  # after every accepted bit, and the resulting policy is stored on
+  # the long-lived `env_policies` row for the submission's
+  # `(env_name, config_sig)`. Subsequent submissions inherit the
+  # lineage automatically.
   #
   # Body:
   #
@@ -242,8 +244,11 @@ defmodule Server.Router do
   #       "config": { "bits_per_dim": 3, "depth": 1, ... }
   #     }
   #
-  # Rejects with 409 if an experiment for the same env is already
-  # active (one experiment per env at a time).
+  # Rejects with 409 if an experiment for the same
+  # `(env_name, config_sig)` lineage is already active. Two
+  # submissions for the same env_name with DIFFERENT policy-shape
+  # configs (different bits_per_dim etc.) get separate lineages and
+  # run in parallel.
   post "/api/master/experiments" do
     submitter = List.first(get_req_header(conn, "x-submitter"))
 
@@ -275,7 +280,10 @@ defmodule Server.Router do
       {:error, :already_running} ->
         send_json(conn, 409, %{
           error: "already_running",
-          message: "An experiment for this env is already pending/running"
+          message:
+            "An experiment for this (env_name, config) lineage is already pending/running. " <>
+              "Submissions for the same env with a DIFFERENT policy-shape config " <>
+              "(bits_per_dim, depth, feature_types, max_coeff, tridiag_*) are accepted in parallel."
         })
 
       {:error, reason} ->
@@ -312,7 +320,19 @@ defmodule Server.Router do
   get "/api/master/experiments/:id" do
     case Server.Experiments.get(id) do
       {:ok, e} ->
-        send_json(conn, 200, %{
+        env_policy =
+          case e.env_policy_id do
+            nil ->
+              nil
+
+            _ ->
+              case Server.EnvPolicies.for_experiment(e) do
+                {:ok, ep} -> ep
+                _ -> nil
+              end
+          end
+
+        body = %{
           id: e.id,
           env_name: e.env_name,
           env_key: e.env_key,
@@ -323,14 +343,30 @@ defmodule Server.Router do
           accepted_count: e.accepted_count,
           current_cegar_iter: e.current_cegar_iter,
           current_iter: e.current_iter,
-          bit_progress: e.bit_progress,
-          predicates: e.predicates,
           inserted_at: e.inserted_at,
           started_at: e.started_at,
           completed_at: e.completed_at,
           error: e.error,
-          submitter: e.submitter
-        })
+          submitter: e.submitter,
+          env_policy_id: e.env_policy_id,
+          env_policy:
+            env_policy &&
+              %{
+                id: env_policy.id,
+                env_name: env_policy.env_name,
+                config_sig: env_policy.config_sig,
+                config_data: env_policy.config_data,
+                policy_version: env_policy.policy_version,
+                predicates: env_policy.predicates,
+                best_reward: env_policy.best_reward,
+                baseline_reward: env_policy.baseline_reward,
+                n_episodes: env_policy.n_episodes,
+                first_seen_at: env_policy.first_seen_at,
+                updated_at: env_policy.updated_at
+              }
+        }
+
+        send_json(conn, 200, body)
 
       {:error, :not_found} ->
         send_json(conn, 404, %{error: "experiment_not_found"})

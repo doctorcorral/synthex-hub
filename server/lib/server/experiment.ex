@@ -1,17 +1,39 @@
 defmodule Server.Experiment do
   @moduledoc """
-  A CEGAR synthesis run. The unit of "experiment" on Synthex Hub.
+  A CEGAR synthesis SESSION. One row per `POST /api/master/experiments`
+  submission. The session attaches to a long-lived
+  `Server.EnvPolicy` row (the *lineage*) which is the source of truth
+  for the synthesized predicates and the running `policy_version`.
 
-  One row per submission. The master loop that drives it is an
-  Oban job (`Server.Workers.ExperimentBootstrap` →
-  `Server.Workers.ExperimentCegarIter` ×N → `Server.Workers.ExperimentComplete`)
-  that reads and writes this row after every accepted bit, so a
-  crashed/retried worker resumes from exactly where it left off
-  rather than wasting compute redoing accepted bits.
+  ## Lineage / session split
+
+  Before `env_policies`, an experiment row owned both the session
+  state AND the policy state. When a session crashed/cancelled/failed
+  the predicates went with it — the next submission for the same env
+  started from `falsep` and rediscovered the same bits again.
+
+  Now:
+
+    * `Server.EnvPolicy` owns `predicates`, `policy_version`,
+      `best_reward`, `baseline_reward` — survives every experiment
+      session for its `(env_name, config_sig)`.
+
+    * `Server.Experiment` owns the session-scoped fields below: which
+      CEGAR step we're on, when we started, how many bits this session
+      accepted, whether the session is still running. All policy
+      state is fetched via the `env_policy_id` FK.
+
+  This module is therefore a session log. `experiments.best_reward`
+  is the highest reward observed *during this session* (>=
+  env_policy.best_reward at session start by construction, since the
+  commit gate's monotonicity guards reject regressions);
+  `experiments.baseline_reward` is what the session started from
+  (== env_policy.best_reward at submit time, or the empty-policy
+  reward when this session was the lineage's first).
 
   ## State machine
 
-      pending  ──bootstrap──→ running ──last_iter_done──→ completed
+      pending  ──bootstrap──→ running ──last_step_done──→ completed
          ↓                       ↓
        (fail / cancel)         (fail / cancel)
          ↓                       ↓
@@ -31,48 +53,52 @@ defmodule Server.Experiment do
     field :config, :map, default: %{}
     field :status, :string, default: "pending"
 
-    field :predicates, :map, default: %{"preds" => []}
+    # CEGAR step within the configured `cegar_rounds`. The streaming
+    # controller advances this on each step's saturation.
     field :current_cegar_iter, :integer, default: 0
     field :current_iter, :integer, default: 0
-    field :bit_shuffle, {:array, :integer}, default: []
-    field :bit_progress, {:array, :integer}, default: []
 
+    # Session-scoped reward summary. `baseline_reward` is the reward
+    # of the policy this session started from (inherited from
+    # env_policy, or empty-policy reward if the session was the
+    # lineage's first). `best_reward` is the highest reward the
+    # commit gate accepted during this session — by the
+    # monotonicity invariant it is always >= baseline_reward and
+    # always >= env_policy.best_reward at session start.
     field :baseline_reward, :float
     field :best_reward, :float
     field :accepted_count, :integer, default: 0
-
-    # Streaming-CEGAR §Layer 3 commit gate. `policy_version` is the
-    # monotonically increasing counter the gate enforces; every
-    # accepted commit bumps it by 1 (see `Server.CommitGate`).
-    # `best_reward_per_bit` is the per-bit pool snapshot the gate
-    # consults to decide if a new candidate beats the current best
-    # for its bit. Keyed by stringified bit index; `nil` when a bit
-    # has never been scored at the current version.
-    field :policy_version, :integer, default: 0
-    field :best_reward_per_bit, :map, default: %{}
 
     field :started_at, :utc_datetime_usec
     field :completed_at, :utc_datetime_usec
     field :error, :string
 
+    # The lineage this session writes into. Set by `ExperimentBootstrap`
+    # (upserting an env_policies row if one doesn't yet exist for
+    # the submission's `(env_name, config_sig)`). After bootstrap
+    # this is immutable.
+    belongs_to :env_policy, Server.EnvPolicy, type: Ecto.UUID
+
     timestamps(type: :utc_datetime_usec)
   end
 
-  @castable ~w(env_name env_key submitter config status predicates
-               current_cegar_iter current_iter bit_shuffle bit_progress
+  @castable ~w(env_name env_key submitter config status
+               current_cegar_iter current_iter
                baseline_reward best_reward accepted_count
-               policy_version best_reward_per_bit
-               started_at completed_at error)a
+               started_at completed_at error env_policy_id)a
 
   def changeset(experiment, attrs) do
     experiment
     |> cast(attrs, @castable)
     |> validate_required([:env_name, :env_key])
     |> validate_inclusion(:status, ~w(pending running completed failed cancelled))
-    # Matches the partial unique index in the migration. Lets the
-    # changeset surface a clean :env_name error when an operator
-    # double-submits for an env that already has a pending/running
-    # row.
-    |> unique_constraint(:env_name, name: :experiments_one_active_per_env)
+    # Matches the partial unique index in the migration. The
+    # constraint surface uses `env_policy_id` because a lineage is
+    # the natural "one active at a time" boundary now — two
+    # submissions for the same env with DIFFERENT configs (different
+    # bits_per_dim etc.) get different env_policy_ids and run in
+    # parallel; two submissions with the SAME config share an
+    # env_policy_id and conflict.
+    |> unique_constraint(:env_policy_id, name: :experiments_one_active_per_env_policy)
   end
 end

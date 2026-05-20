@@ -16,7 +16,7 @@ config :server,
 #
 # `Lifeline.rescue_after` is the orphan-detection deadline. The
 # master worker heartbeats `attempted_at` every 60 s (see
-# `Server.Workers.ExperimentCegarIter`), so a HEALTHY iter stays
+# `Server.Workers.ExperimentController`), so a HEALTHY step stays
 # well inside any reasonable bound regardless of how long the
 # underlying bit search takes. With a 60 s heartbeat, 5 min gives
 # tolerance for transient DB hiccups while keeping orphan recovery

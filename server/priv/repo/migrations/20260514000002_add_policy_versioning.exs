@@ -27,10 +27,12 @@ defmodule Server.Repo.Migrations.AddPolicyVersioning do
       `(experiment_id, committed_at)` so the dashboard's commit-log
       strip + reward-over-time chart are cheap to render.
 
-  Forward-compatible with the existing `ExperimentCegarIter` flow:
-  it ignores `policy_version` (writes never touch it), and the column
-  defaults to 0. When `ExperimentController` lands in Step 2 it'll
-  drive these columns.
+  Forward-compatible with the legacy `ExperimentCegarIter` flow at
+  the time of this migration: it ignored `policy_version` (writes
+  never touched it), and the column defaulted to 0.
+  `ExperimentController` (Step 2) drives these columns; the
+  `experiments.policy_version` / `best_reward_per_bit` columns are
+  later dropped by the env_policies promotion migration.
   """
 
   def up do

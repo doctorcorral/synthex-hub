@@ -5,31 +5,40 @@ defmodule Server.Workers.ExperimentBootstrap do
   Responsibilities:
 
     1. Read the experiment row.
-    2. Initialize the predicate vector (`List.duplicate(:falsep, n_bits)`).
-    3. Compute the baseline reward via a validation pass through
-       `Synthex.Hub.Client` pointing at localhost.
-    4. Persist `predicates`, `baseline_reward`, `current_cegar_iter=1`,
-       `current_iter=1`, and flip `status → running`.
-    5. Enqueue the first `ExperimentCegarIter` job.
+    2. Look up (or create) the `Server.EnvPolicy` for this
+       experiment's `(env_name, config_sig)`. The env_policy is the
+       source of truth for the synthesized predicates and the
+       lineage's `policy_version` — see `Server.EnvPolicy`'s
+       moduledoc for the lineage / session split.
+    3. Inherit the env_policy's predicates as this session's
+       starting state:
+         * `:existing` (lineage already has a winner) — start from
+           the lineage's committed predicates at its current
+           `policy_version`. The session's `baseline_reward` is the
+           lineage's `best_reward` (what we're starting from);
+           commits only land if they improve on it.
+         * `:created` (lineage is fresh) — start from `falsep`,
+           evaluate the empty-policy baseline, write it into the
+           env_policy via `EnvPolicies.ensure_baseline/3`.
+    4. Persist on the experiment row: `env_policy_id`, the inherited
+       (or freshly-measured) baseline, `current_cegar_iter=1`,
+       `current_iter=1`, status → `running`.
+    5. Enqueue the first `ExperimentController` job.
+
+  ## Retry safety
 
   If steps 1-4 succeed but step 5 fails, Oban retries with the row
-  already initialized — the next attempt re-enters this worker,
-  sees `status == "running"`, and just re-enqueues the iter job.
-  That's safe because `ExperimentCegarIter` is itself idempotent
-  on the experiment row.
-
-  ## Why retries
-
-  `Oban.Worker` with `max_attempts: 3` and exponential backoff. The
-  scoring leg (`Synthex.Hub.Client`) is allowed to take hours, so the
-  worker's own runtime is unbounded but cheap — almost all wall
-  time is spent inside one HTTP poll loop.
+  already initialized — the next attempt sees `status == "running"`
+  and just re-enqueues the controller. `upsert_for_submission/2` is
+  idempotent: a fresh env_policy is only inserted if one doesn't
+  already exist for the `(env_name, sig)` pair.
   """
 
   use Oban.Worker, queue: :master, max_attempts: 3
   require Logger
 
-  alias Server.{Experiments, Experiment}
+  alias Server.{EnvPolicies, Experiment, Experiments}
+  alias Synthex.Core.PrettyPrint
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"experiment_id" => id}}) do
@@ -50,7 +59,15 @@ defmodule Server.Workers.ExperimentBootstrap do
         enqueue_first_step(exp.id)
 
       {:ok, %Experiment{status: "pending"} = exp} ->
-        bootstrap(exp)
+        try do
+          bootstrap(exp)
+        catch
+          {:duplicate_session, _id} ->
+            # Sibling session won the active-lineage race; bootstrap
+            # transitioned us to `cancelled` already. Return `:ok` so
+            # Oban marks this job complete rather than retrying.
+            :ok
+        end
     end
   end
 
@@ -59,48 +76,144 @@ defmodule Server.Workers.ExperimentBootstrap do
 
     env_key = decode_env_key(exp.env_key)
     ctx = build_context(env_key, exp.config, exp.id)
+    n_episodes = ctx.n_episodes
 
-    initial_preds = Synthex.Gym.Mujoco.initial_predicates(ctx)
-    val_seeds = Synthex.Gym.Mujoco.validation_seeds()
-
-    # Baseline = validation reward of the falsep predicates. Establishes
-    # the starting point against which every accepted bit's improvement
-    # is measured. Surfaced on the landing page as the dashed line on
-    # the reward sparkline.
-    {total_reward, _survived} = Synthex.Gym.Mujoco.validate(initial_preds, val_seeds, ctx)
-    baseline_avg = total_reward / length(val_seeds)
-
-    Logger.info("[Bootstrap] #{exp.env_name} baseline = #{Float.round(baseline_avg, 2)}/ep")
-
-    {:ok, _exp} =
-      Experiments.update_state(exp, %{
-        "status" => "running",
-        "started_at" => DateTime.utc_now(),
-        "predicates" => %{"preds" => Enum.map(initial_preds, &Synthex.Core.PrettyPrint.to_json_term/1)},
-        "current_cegar_iter" => 1,
-        "current_iter" => 1,
-        "bit_shuffle" => [],
-        "bit_progress" => [],
-        "baseline_reward" => baseline_avg,
-        "best_reward" => baseline_avg
+    # Locate or create the env_policy lineage for this (env, sig).
+    {:ok, env_policy, status} =
+      EnvPolicies.upsert_for_submission(%{
+        env_name: exp.env_name,
+        env_key: exp.env_key,
+        config: exp.config || %{}
       })
+
+    {predicates, session_baseline, env_policy} =
+      if status == :existing and has_committed_predicates?(env_policy) do
+        # Lineage has at least one accepted commit. Start from its
+        # current policy; baseline (for the session's
+        # delta-vs-baseline display) is what the lineage achieved
+        # before we arrived.
+        preds = decode_predicates(env_policy.predicates)
+
+        baseline =
+          env_policy.best_reward ||
+            measure_baseline(preds, ctx)
+
+        {:ok, env_policy} = EnvPolicies.ensure_baseline(env_policy, baseline, n_episodes)
+
+        Logger.info(
+          "[Bootstrap] #{exp.env_name} inheriting lineage v=#{env_policy.policy_version} " <>
+            "(#{length(preds)} bits, baseline=#{Float.round((baseline || 0.0) / n_episodes, 2)}/ep)"
+        )
+
+        {preds, baseline, env_policy}
+      else
+        # Fresh lineage — first ever submission for this (env, sig)
+        # (or an existing lineage that has no predicates yet because
+        # we backfilled it empty). Evaluate the empty-policy baseline
+        # and seed env_policies with it.
+        initial_preds = Synthex.Gym.Mujoco.initial_predicates(ctx)
+        baseline = measure_baseline(initial_preds, ctx)
+
+        encoded = %{"preds" => Enum.map(initial_preds, &PrettyPrint.to_json_term/1)}
+
+        {:ok, env_policy} =
+          env_policy
+          |> Ecto.Changeset.change(predicates: encoded)
+          |> Server.Repo.update()
+
+        {:ok, env_policy} = EnvPolicies.ensure_baseline(env_policy, baseline, n_episodes)
+
+        Logger.info(
+          "[Bootstrap] #{exp.env_name} fresh lineage; " <>
+            "baseline=#{Float.round(baseline / n_episodes, 2)}/ep"
+        )
+
+        {initial_preds, baseline, env_policy}
+      end
+
+    case Experiments.update_state(exp, %{
+           "env_policy_id" => env_policy.id,
+           "status" => "running",
+           "started_at" => DateTime.utc_now(),
+           "current_cegar_iter" => 1,
+           "current_iter" => 1,
+           "baseline_reward" => session_baseline,
+           "best_reward" => session_baseline
+         }) do
+      {:ok, _updated} ->
+        :ok
+
+      {:error, %Ecto.Changeset{errors: errors}} = err ->
+        # Most likely cause: the partial unique index
+        # `experiments_one_active_per_env_policy` fired because
+        # another session for this (env, sig) raced us through
+        # bootstrap and got there first. Cancel this duplicate
+        # session cleanly rather than retrying forever.
+        if Keyword.has_key?(errors, :env_policy_id) do
+          Logger.info(
+            "[Bootstrap] #{exp.env_name} duplicate submission for active lineage; cancelling #{exp.id}"
+          )
+
+          {:ok, _} =
+            Experiments.mark_cancelled(
+              exp,
+              "duplicate submission — another session for this (env, config) lineage is already active"
+            )
+
+          Experiments.log_event!(
+            "warn",
+            "master",
+            "duplicate submission cancelled: #{exp.env_name} (#{exp.id}) — " <>
+              "another session for the same lineage was already active",
+            env_name: exp.env_name,
+            experiment_id: exp.id,
+            metadata: %{"env_policy_id" => env_policy.id}
+          )
+
+          throw({:duplicate_session, exp.id})
+        else
+          # Some other validation failure — surface it via Oban retry.
+          raise "ExperimentBootstrap update_state failed: #{inspect(err)}"
+        end
+    end
 
     Experiments.log_event!(
       "info",
       "master",
-      "bootstrap complete: #{exp.env_name} baseline=#{Float.round(baseline_avg, 2)}",
+      "bootstrap complete: #{exp.env_name} v=#{env_policy.policy_version} " <>
+        "baseline=#{Float.round((session_baseline || 0.0) / n_episodes, 2)}/ep " <>
+        "(#{length(predicates)} bits inherited)",
       env_name: exp.env_name,
       experiment_id: exp.id,
-      metadata: %{"baseline_reward" => baseline_avg}
+      metadata: %{
+        "baseline_reward" => session_baseline,
+        "env_policy_id" => env_policy.id,
+        "inherited_policy_version" => env_policy.policy_version,
+        "inherited_accepted_bits" => length(predicates)
+      }
     )
 
     enqueue_first_step(exp.id)
   end
 
+  defp measure_baseline(preds, ctx) do
+    val_seeds = Synthex.Gym.Mujoco.validation_seeds()
+    {total_reward, _survived} = Synthex.Gym.Mujoco.validate(preds, val_seeds, ctx)
+    total_reward / length(val_seeds)
+  end
+
+  defp has_committed_predicates?(%{predicates: %{"preds" => list}}) when is_list(list) and list != [],
+    do: true
+
+  defp has_committed_predicates?(_), do: false
+
+  defp decode_predicates(%{"preds" => list}) when is_list(list),
+    do: Enum.map(list, &PrettyPrint.from_json_term/1)
+
+  defp decode_predicates(_), do: []
+
   # Streaming CEGAR controller (`docs/streaming-cegar.md` §Layer 3 /
-  # "Step 2" of the deployment plan). The legacy Jacobi-iter
-  # `ExperimentCegarIter` is retained one release for emergency
-  # revert but no longer enqueued by bootstrap.
+  # "Step 2" of the deployment plan).
   defp enqueue_first_step(experiment_id) do
     case Server.Workers.ExperimentController.new(%{"experiment_id" => experiment_id})
          |> Oban.insert() do
@@ -109,7 +222,7 @@ defmodule Server.Workers.ExperimentBootstrap do
     end
   end
 
-  # ── Helpers shared with ExperimentCegarIter ─────────────────
+  # ── Helpers shared with the controller ──────────────────────
 
   @doc """
   Build a Synthex.Gym.Mujoco context from an experiment config,
@@ -134,9 +247,6 @@ defmodule Server.Workers.ExperimentBootstrap do
   # 50–70% of the master's per-batch transient heap and is the
   # difference between fitting in our 4 GB Fly machines and OOMing
   # on Ant's tridiag pool (≈ 300 K candidates per `score_bit`).
-  #
-  # `Synthex.Hub.Scorer` is still the right answer for laptop-driven
-  # remote masters; we just don't run those in the Oban path.
   defp build_local_scorer(env_key, experiment_id, config) do
     chunk_size = get_int(config, "chunk_size", 10)
     collect_chunk_size = get_int(config, "collect_states_chunk_size", 4)

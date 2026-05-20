@@ -57,8 +57,7 @@ defmodule Server.Application do
   # job whose `attempted_at` is older than a couple of beats can't
   # possibly have a live owner — reset it to `:available` so Oban
   # picks it up immediately. The `unique` constraint on
-  # ExperimentController (and legacy ExperimentCegarIter) still
-  # protects against double-running.
+  # ExperimentController still protects against double-running.
   defp rescue_orphan_executing_jobs do
     import Ecto.Query
 

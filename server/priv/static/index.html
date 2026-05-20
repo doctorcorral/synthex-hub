@@ -305,6 +305,19 @@
       font-weight: 600; font-size: 15px; color: var(--fg);
       letter-spacing: -0.005em;
     }
+    /* Config-summary subtitle: a compact rendering of the
+       policy-shape-determining sub-config (e.g. "b=3 · d=1 ·
+       f=axis,diag,prod"). Different summaries = different lineages
+       for the same env, shown side-by-side. */
+    .exp-config {
+      display: block;
+      font-weight: 400;
+      font-size: 11px;
+      color: var(--fg-faint);
+      letter-spacing: 0.01em;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
     .exp-state {
       font-size: 11px; text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -994,23 +1007,32 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       rows.sort((a, b) => {
         const ta = tier(a), tb = tier(b);
         if (ta !== tb) return ta - tb;
-        return String(a.env_name).localeCompare(String(b.env_name));
+        // Within a tier, group by env_name first, then by config_sig
+        // so cards for the same env (different policy-shape configs)
+        // sit next to each other for easy side-by-side comparison.
+        const envCmp = String(a.env_name).localeCompare(String(b.env_name));
+        if (envCmp !== 0) return envCmp;
+        return String(a.config_sig || '').localeCompare(String(b.config_sig || ''));
       });
 
       root.innerHTML = rows.map(renderExperimentCard).join('');
 
       // Re-apply expansion state across re-renders so the 15-second
       // grid refresh doesn't yank the policy panel away mid-read.
-      expandedEnvs.forEach(env => {
-        const card = root.querySelector('.exp[data-env="' + cssEscape(env) + '"]');
+      // `expandedEnvs` keys are card-keys (`env_name__config_sig`) so
+      // multiple lineages for the same env_name remember their
+      // expansion state independently.
+      expandedEnvs.forEach(cardKey => {
+        const card = root.querySelector('.exp[data-card-key="' + cssEscape(cardKey) + '"]');
         if (!card) {
-          expandedEnvs.delete(env);
+          expandedEnvs.delete(cardKey);
           return;
         }
         card.setAttribute('aria-expanded', 'true');
         const slot = card.querySelector('.exp-policy');
-        fetchPolicyInto(slot, env, /*useCache=*/true);
-        setTimeout(() => fetchPolicyInto(slot, env, false), 50);
+        const envName = card.getAttribute('data-env');
+        fetchPolicyInto(slot, envName, /*useCache=*/true);
+        setTimeout(() => fetchPolicyInto(slot, envName, false), 50);
       });
 
       // Re-paint the per-card live aggregates strip from the cached
@@ -1117,16 +1139,13 @@ mix run experiments/humanoid/round-1.exs</code></pre>
           '</div>';
       }
 
-      // ── historical best (only shown when distinct from current) ──
-      let historicalLine = '';
-      if (isLive &&
-          r.best_reward !== null && r.best_reward !== undefined) {
-        historicalLine =
-          '<div class="exp-row">' +
-            '<span class="label">all-time</span>' +
-            '<span class="val">' + fmtScore(r.best_reward) + '</span>' +
-          '</div>';
-      }
+      // ── lineage best (now == card's r.best_reward by construction) ──
+      // Pre-env_policies promotion, the dashboard tracked an "all-time
+      // best" across experiment sessions because the policy died with
+      // each session. Now `r.best_reward` IS the lineage's best (and
+      // by the commit gate's strict-monotonicity invariant equals
+      // the active session's best when live). No separate line.
+      const historicalLine = '';
 
       // ── latest completed run line ──────────────────────────
       let latestLine = '';
@@ -1183,12 +1202,15 @@ mix run experiments/humanoid/round-1.exs</code></pre>
           'CEGAR ' + (r.active.cegar_iter || 0) + '/' + (r.active.total_cegar_iters || '?') +
           '  iter ' + (r.active.iter || 0) + '/' + (r.active.total_iters || '?');
 
+        // Per-session accepted bit counter. `accepted_count` is what
+        // the commit gate has landed THIS SESSION (the lineage's
+        // all-time accepted count is implicit in `r.policy_version`).
         const bitsTotal = r.active.n_bits;
-        const bitsDone  = r.active.bits_done || 0;
+        const bitsDone  = r.active.accepted_count || 0;
         const bitsFrag  =
           (bitsTotal !== null && bitsTotal !== undefined)
-            ? '<span class="val">' + fmt(bitsDone) + ' / ' + fmt(bitsTotal) + ' bits</span>'
-            : '<span class="val">' + fmt(bitsDone) + ' bits</span>';
+            ? '<span class="val">' + fmt(bitsDone) + ' / ' + fmt(bitsTotal) + ' bits committed this session</span>'
+            : '<span class="val">' + fmt(bitsDone) + ' bits committed this session</span>';
 
         progressLine =
           '<div class="exp-row">' +
@@ -1324,6 +1346,11 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       }
 
       const env = r.env_name;
+      // Stable card key: `env_name__config_sig`. Survives re-renders
+      // and disambiguates multiple lineages for the same env (e.g.
+      // Ant-v5 with bits_per_dim=3 vs bits_per_dim=4).
+      const cardKey = env + '__' + (r.config_sig || 'nosig');
+      const configSummary = r.config_summary || '';
       // Card tint matches the badge class so cards triage at a glance:
       // red for live alarms (stalled/idle), yellow for `slow` (live
       // but workload >> swarm) and `stopped` (last run produced real
@@ -1341,16 +1368,21 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       // don't blink empty every 15 s.
       const expId = isLive ? r.active.experiment_id : '';
 
-      // Policy-version badge — Streaming-CEGAR §Layer 3 surface.
-      // Only show when the controller has actually committed at
-      // least once OR when the experiment is live (so the "v=0"
-      // baseline is also visible while the swarm warms up).
-      const v = (isLive && Number.isInteger(r.active.policy_version))
-        ? r.active.policy_version
-        : null;
+      // Policy-version badge — the lineage's monotonically-increasing
+      // commit counter. Reads from `r.policy_version` (the env_policy
+      // row's version, surfaced at the card level by the summary
+      // endpoint), falling back to the active session's view if the
+      // top-level field is missing. Always shown — even at v=0 — so
+      // an operator can see at a glance how many bits this lineage
+      // has accumulated across every session in its history.
+      const v = Number.isInteger(r.policy_version)
+        ? r.policy_version
+        : (isLive && Number.isInteger(r.active.policy_version)
+            ? r.active.policy_version
+            : null);
       const versionBadge = (v !== null)
         ? '<span class="exp-version" data-experiment-id="' + escapeHtml(expId) + '" ' +
-            'title="commits accepted under the version-gated streaming controller">' +
+            'title="commits accepted across this lineage\'s history (env_policy version)">' +
             'v=' + v +
           '</span>'
         : '';
@@ -1363,7 +1395,10 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       const commitsCls = 'exp-commits' + (commitsHtml ? ' has-data' : '');
 
       return (
-        '<div class="' + cardCls + '" data-env="' + escapeHtml(env) + '" ' +
+        '<div class="' + cardCls + '" ' +
+             'data-card-key="' + escapeHtml(cardKey) + '" ' +
+             'data-env="' + escapeHtml(env) + '" ' +
+             'data-config-sig="' + escapeHtml(r.config_sig || '') + '" ' +
              'aria-expanded="false" role="button" tabindex="0" ' +
              'onclick="toggleExp(this, event)" ' +
              'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleExp(this,event)}">' +
@@ -1371,6 +1406,11 @@ mix run experiments/humanoid/round-1.exs</code></pre>
             '<div class="exp-env">' +
               escapeHtml(env) +
               (versionBadge ? ' ' + versionBadge : '') +
+              (configSummary
+                ? '<div class="exp-config" title="policy-shape config — different configs are independent lineages">' +
+                    escapeHtml(configSummary) +
+                  '</div>'
+                : '') +
               '<span class="exp-chevron" aria-hidden="true">\u203A</span>' +
             '</div>' +
             '<div class="exp-state ' + stateLabel + '">' + stateLabel + '</div>' +
@@ -1491,21 +1531,25 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       // Don't toggle when the click landed on a link inside the card.
       if (event && event.target && event.target.closest('a')) return;
 
+      // Expansion is tracked per-card-key (env_name + config_sig) so
+      // two lineages for the same env (different policy-shape configs)
+      // remember their expansion state independently. The policy
+      // snapshot fetch still goes via env_name because the snapshot
+      // table is keyed by env (one canonical snapshot per env, set
+      // by whichever lineage's controller pushed most recently).
+      const cardKey = card.getAttribute('data-card-key') || card.getAttribute('data-env');
       const env = card.getAttribute('data-env');
       const expanded = card.getAttribute('aria-expanded') === 'true';
       if (expanded) {
         card.setAttribute('aria-expanded', 'false');
-        expandedEnvs.delete(env);
+        expandedEnvs.delete(cardKey);
         return;
       }
 
       card.setAttribute('aria-expanded', 'true');
-      expandedEnvs.add(env);
+      expandedEnvs.add(cardKey);
       const slot = card.querySelector('.exp-policy');
 
-      // Use cache for instant feedback, but always queue a fresh
-      // fetch so a user staring at an expanded card sees their
-      // master's freshest accepted bit land within a few seconds.
       fetchPolicyInto(slot, env, /*useCache=*/true);
       setTimeout(() => fetchPolicyInto(slot, env, false), 50);
     }

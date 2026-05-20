@@ -9,7 +9,7 @@ defmodule Server.ObanFailureHandler do
       attempt failed, but more attempts remain — we log these at
       info level so a trail exists)
 
-  On terminal failure of an `ExperimentBootstrap` / `ExperimentCegarIter` /
+  On terminal failure of an `ExperimentBootstrap` / `ExperimentController` /
   `ExperimentComplete` job, the handler:
 
     1. Marks the corresponding experiment `failed` and records the
@@ -31,7 +31,6 @@ defmodule Server.ObanFailureHandler do
   @master_workers ~w(
     Server.Workers.ExperimentBootstrap
     Server.Workers.ExperimentController
-    Server.Workers.ExperimentCegarIter
     Server.Workers.ExperimentComplete
   )
 
@@ -144,7 +143,6 @@ defmodule Server.ObanFailureHandler do
 
   defp worker_short_name("Server.Workers.ExperimentBootstrap"), do: "bootstrap"
   defp worker_short_name("Server.Workers.ExperimentController"), do: "controller"
-  defp worker_short_name("Server.Workers.ExperimentCegarIter"), do: "iter"
   defp worker_short_name("Server.Workers.ExperimentComplete"), do: "complete"
   defp worker_short_name(other), do: other
 end
