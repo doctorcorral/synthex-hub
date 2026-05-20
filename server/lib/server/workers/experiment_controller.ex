@@ -777,6 +777,16 @@ defmodule Server.Workers.ExperimentController do
 
   # ── Heartbeat ───────────────────────────────────────────────
 
+  # The heartbeat is a long-lived `receive` loop that bumps
+  # `oban_jobs.attempted_at` + `experiments.updated_at` every minute
+  # so Oban Lifeline and `Server.Experiments.compute_health/2` can
+  # tell a live controller apart from an orphaned one. We start it
+  # *linked* so a crashed heartbeat takes the controller down (the
+  # alternative — silent heartbeat death with the controller
+  # plowing on — would let the dashboard mislabel the run as
+  # `stalled` and Lifeline rescue a still-alive job). The matching
+  # `stop_heartbeat/1` must therefore terminate it WITHOUT relying
+  # on a kill signal that would propagate back through the link.
   defp start_heartbeat(job_id, exp_id) do
     Task.start_link(fn -> heartbeat_loop(job_id, exp_id) end)
   end
@@ -803,6 +813,34 @@ defmodule Server.Workers.ExperimentController do
     end
   end
 
-  defp stop_heartbeat({:ok, pid}) when is_pid(pid), do: Process.exit(pid, :kill)
+  # PREVIOUSLY: `Process.exit(pid, :kill)`. That was the root cause
+  # of the controller-killed-on-step-end family of failures (e.g.
+  # HalfCheetah c9c415a1 finishing step 1/3 with 19 committed bits
+  # at +2117 mean reward, "step done" logged at 02:05:28.652, and
+  # 40 ms later Oban records `EXIT from #PID<...> killed` on attempt
+  # 3 — exhausted retries, experiment failed). The `:kill` exit
+  # reason is untrappable; the heartbeat dies with `:killed`, and
+  # because we started it via `Task.start_link/1` (intentionally —
+  # see `start_heartbeat/2`'s doc), the EXIT signal propagates back
+  # to the controller. The controller doesn't trap exits, so it
+  # dies too — with reason `:killed`, which Oban records as a
+  # failure and counts against `max_attempts`. After three clean
+  # step-ends in a row the controller is permanently `discarded`
+  # and `Server.ObanFailureHandler` marks the experiment `failed`.
+  # The work itself is fine — every commit landed atomically via
+  # `Server.CommitGate` before this kill — but the master loop
+  # bails before it can advance to the next CEGAR step.
+  #
+  # Fix: unlink first (so even a stray late exit can't take us
+  # down), then send the already-supported `:stop` message which
+  # the loop's `receive` handles by returning `:ok` cleanly. Idempotent
+  # against a dead pid (silent `send` to a dead pid is fine; the
+  # `unlink` is a no-op for a non-link).
+  defp stop_heartbeat({:ok, pid}) when is_pid(pid) do
+    Process.unlink(pid)
+    send(pid, :stop)
+    :ok
+  end
+
   defp stop_heartbeat(_), do: :ok
 end
