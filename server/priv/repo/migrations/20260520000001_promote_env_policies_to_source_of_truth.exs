@@ -167,9 +167,15 @@ defmodule Server.Repo.Migrations.PromoteEnvPoliciesToSourceOfTruth do
   defp backfill_env_policies do
     repo = repo()
 
+    # NOTE: select raw UUIDs (not ::text) so Postgrex returns them as
+    # 16-byte binaries — that's the only form `$N::uuid` parameters
+    # accept on the way back into INSERT / UPDATE statements. The
+    # earlier draft used `::text` and bounced off Postgrex's strict
+    # pre-encode validator with "expected a binary of 16 bytes, got
+    # '<uuid-string>'".
     %Postgrex.Result{rows: rows} =
       repo.query!("""
-      SELECT id::text, env_name, env_key, config,
+      SELECT id, env_name, env_key, config,
              predicates, policy_version,
              baseline_reward, best_reward, accepted_count,
              inserted_at
@@ -227,8 +233,10 @@ defmodule Server.Repo.Migrations.PromoteEnvPoliciesToSourceOfTruth do
     # then most recent inserted_at.
     winner =
       Enum.max_by(exps, fn e ->
-        {e.accepted_count || 0, e.best_reward || -1.0e15,
-         (e.inserted_at && NaiveDateTime.to_iso8601(e.inserted_at)) || ""}
+        # inserted_at can come back as DateTime or NaiveDateTime
+        # depending on column type / Postgrex codec — use the
+        # erlang term ordering which works for both.
+        {e.accepted_count || 0, e.best_reward || -1.0e15, e.inserted_at}
       end)
 
     {predicates_json, version, best_reward, n_eps, env_key} =
@@ -251,7 +259,7 @@ defmodule Server.Repo.Migrations.PromoteEnvPoliciesToSourceOfTruth do
         VALUES
           (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, $6,
            $7, $8, $9, $10::uuid, now(), now(), now())
-        RETURNING id::text
+        RETURNING id
         """,
         [
           env_name,
