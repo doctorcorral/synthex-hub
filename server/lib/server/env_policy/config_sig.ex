@@ -132,16 +132,24 @@ defmodule Server.EnvPolicy.ConfigSig do
     {hash(canonical), canonical}
   end
 
-  # JSON with keys sorted top-level. The canonical map only has
-  # @policy_shape_keys at the top so a one-level sort is enough; we
-  # avoid recursive sort because feature_types/tridiag_dims are
-  # already normalized to deterministic forms by normalize_value.
+  # JSON-shaped string with keys in @policy_shape_keys order. Two
+  # configs canonicalize-equal iff they produce the same string, so
+  # the order MUST be deterministic — Map iteration order in BEAM
+  # is implementation-defined and changes with internal representation
+  # (flat-map vs. hashed-map transition at 32 keys). We hand-build
+  # the object string to dodge that entirely.
+  #
+  # feature_types/tridiag_dims values are already canonicalized to
+  # sorted lists by normalize_value, so a recursive sort isn't needed.
   defp stable_encode(map) do
-    pairs =
+    body =
       @policy_shape_keys
-      |> Enum.map(fn k -> {k, Map.get(map, k)} end)
+      |> Enum.map(fn k ->
+        "\"#{k}\":" <> Jason.encode!(Map.get(map, k))
+      end)
+      |> Enum.join(",")
 
-    Jason.encode!(pairs)
+    "{" <> body <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
