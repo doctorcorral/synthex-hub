@@ -290,6 +290,12 @@ defmodule Server.Repo.Migrations.PromoteEnvPoliciesToSourceOfTruth do
         winner.env_key
       }
 
+    # NOTE: do NOT pre-encode maps with Jason.encode! before passing
+    # them to a jsonb parameter — Postgrex's default jsonb codec
+    # invokes Jason.encode! itself, so a pre-encoded string ends up
+    # double-encoded as a jsonb STRING value (e.g. the column reads
+    # back as `"{...}"` instead of `{...}`). Hand Postgrex the raw
+    # map and let it serialize.
     %Postgrex.Result{rows: [[env_policy_id]]} =
       repo.query!(
         """
@@ -299,16 +305,16 @@ defmodule Server.Repo.Migrations.PromoteEnvPoliciesToSourceOfTruth do
            n_episodes, last_committed_by_experiment_id,
            first_seen_at, inserted_at, updated_at)
         VALUES
-          (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5::jsonb, $6,
-           $7, $8, $9, $10::uuid, now(), now(), now())
+          (gen_random_uuid(), $1, $2, $3, $4, $5, $6,
+           $7, $8, $9, $10, now(), now(), now())
         RETURNING id
         """,
         [
           env_name,
           env_key,
           sig,
-          canonical |> Jason.encode!(),
-          predicates_json |> Jason.encode!(),
+          canonical,
+          predicates_json,
           version,
           best_reward,
           baseline,
