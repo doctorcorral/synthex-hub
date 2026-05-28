@@ -22,15 +22,31 @@ if config_env() == :prod do
 
   config :server, Server.Repo,
     url: database_url,
-    # Pool 10 saturated almost immediately under realistic load: with
-    # 12 active workers each completing ~30 chunks/sec, plus master
-    # polling every 5s, plus Oban's own polling, we routinely had
-    # >10 concurrent SQL operations queuing for connections. Bumped
-    # to 30; checkout queue timeout from 15s default to 60s for
-    # extra slack on cold-cache queries against Neon.
-    pool_size: String.to_integer(System.get_env("POOL_SIZE", "30")),
-    queue_target: 1_000,
-    queue_interval: 5_000,
+    # Pool sizing history:
+    #   10 → saturated almost immediately
+    #   30 → held up with 1–2 active experiments
+    #   60 → currently default, comfortable headroom for 3
+    #        concurrent CEGAR controllers + AggregateBroker +
+    #        Oban polling + a swarm of worker chunk submissions.
+    #
+    # Postgres on Neon comfortably serves >100 concurrent backends;
+    # the bottleneck is always our app-side pool, never the
+    # database. Crank POOL_SIZE higher (via Fly secret) if you
+    # find DBConnection.ConnectionError reappearing — it's free as
+    # long as we stay under the Postgres max_connections.
+    #
+    # queue_target / queue_interval govern Ecto's pool-overload
+    # heuristic: if checkouts wait longer than queue_target for
+    # more than half of a queue_interval window, the pool starts
+    # DROPPING requests with a ConnectionError. Old values
+    # (1_000ms / 5_000ms) were tuned for user-facing latency —
+    # but we're a master-and-workers backend, none of these
+    # callers are humans. Better to wait 5s for a connection than
+    # to crash an Oban controller mid-CEGAR-pass and burn through
+    # its max_attempts on a transient blip.
+    pool_size: String.to_integer(System.get_env("POOL_SIZE", "60")),
+    queue_target: String.to_integer(System.get_env("DB_QUEUE_TARGET_MS", "5000")),
+    queue_interval: String.to_integer(System.get_env("DB_QUEUE_INTERVAL_MS", "30000")),
     timeout: 60_000,
     ssl: ssl_enabled,
     ssl_opts: ssl_opts

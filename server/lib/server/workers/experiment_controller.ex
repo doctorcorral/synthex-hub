@@ -383,7 +383,7 @@ defmodule Server.Workers.ExperimentController do
          epsilon,
          wave_num
        ) do
-    case Experiments.get(exp_id) do
+    case with_db_retry(fn -> Experiments.get(exp_id) end) do
       {:error, :not_found} ->
         Logger.info("[Controller] bit #{bit_idx}: experiment gone, halting pass")
         {{nc, ns, ni, nf + 1}, a}
@@ -396,7 +396,7 @@ defmodule Server.Workers.ExperimentController do
         {{nc, ns, ni, nf + 1}, a}
 
       {:ok, %Experiment{} = exp_now} ->
-        {:ok, env_policy_now} = EnvPolicies.for_experiment(exp_now)
+        {:ok, env_policy_now} = with_db_retry(fn -> EnvPolicies.for_experiment(exp_now) end)
         v_current = env_policy_now.policy_version
         preds_now = decode_predicates(env_policy_now.predicates)
 
@@ -672,6 +672,43 @@ defmodule Server.Workers.ExperimentController do
   # high-variance envs.
   defp acceptance_epsilon(%{"acceptance_epsilon" => v}) when is_number(v), do: v * 1.0
   defp acceptance_epsilon(_), do: 0.0
+
+  # Transient pool blips (DBConnection.ConnectionError "request was
+  # dropped from queue") shouldn't burn through Oban's 3-attempt
+  # budget — the bit loop fires hundreds of small reads per CEGAR
+  # pass, and even a brief saturation during a wave dispatch
+  # surge can crash the whole controller mid-stride. Retry the
+  # read up to 4 times with exponential backoff (~250ms → 4s
+  # cumulative) before propagating; that's enough to ride out
+  # the queue_interval window without hard-crashing.
+  #
+  # Only wrap small idempotent reads. Repo.transaction blocks
+  # MUST NOT be retried this way — they hold a checked-out
+  # connection across the retry, defeating the purpose.
+  @retry_backoffs_ms [250, 500, 1500, 3000]
+
+  defp with_db_retry(fun) do
+    with_db_retry(fun, @retry_backoffs_ms)
+  end
+
+  defp with_db_retry(fun, []) do
+    fun.()
+  end
+
+  defp with_db_retry(fun, [backoff | rest]) do
+    try do
+      fun.()
+    rescue
+      err in DBConnection.ConnectionError ->
+        Logger.warning(
+          "[Controller] transient DB pool error, retrying in #{backoff}ms " <>
+            "(#{length(rest)} more attempts): #{Exception.message(err)}"
+        )
+
+        Process.sleep(backoff)
+        with_db_retry(fun, rest)
+    end
+  end
 
   defp bit_concurrency(%{"bit_concurrency" => v}) when is_integer(v) and v > 0, do: v
   defp bit_concurrency(_), do: @default_bit_concurrency
