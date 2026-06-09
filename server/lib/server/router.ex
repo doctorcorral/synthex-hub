@@ -527,28 +527,37 @@ defmodule Server.Router do
   defp send_full_batch(conn, batch_id) do
     Server.Queue.touch_master_poll(batch_id)
 
-    case Server.Queue.get_batch(batch_id) do
-      {:ok, batch} ->
-        send_json(conn, 200, %{
-          batch_id: batch.id,
-          name: batch.name,
-          env_name: batch.env_name,
-          cmd: batch.cmd,
-          status: batch.status,
-          total_chunks: batch.total_chunks,
-          completed_chunks: batch.completed_chunks,
-          progress:
-            if(batch.total_chunks > 0,
-              do: batch.completed_chunks / batch.total_chunks,
-              else: 1.0
-            ),
-          best_reward: batch.best_reward,
-          baseline_reward: batch.baseline_reward,
-          results: batch.results,
-          inserted_at: batch.inserted_at,
-          completed_at: batch.completed_at
-        })
-
+    # Two-phase: lightweight progress lookup for the metadata, then
+    # per-chunk items pulled from oban_jobs.args["results"]. Used to
+    # serve everything from a single `Repo.get(Batch)` that included
+    # the `Batch.results` column — but that column is no longer
+    # populated (see `Server.Queue.fetch_batch_chunks/1`'s docs for
+    # the O(N²) egress story). The wire shape is preserved: callers
+    # still get `results: [%{"chunk_index" => i, "items" => [...]}]`
+    # sorted by chunk_index, so `Synthex.Hub.Client` keeps working
+    # unchanged.
+    with {:ok, progress} <- Server.Queue.get_batch_progress(batch_id),
+         {:ok, chunks} <- Server.Queue.fetch_batch_chunks(batch_id) do
+      send_json(conn, 200, %{
+        batch_id: progress.id,
+        name: progress.name,
+        env_name: progress.env_name,
+        cmd: progress.cmd,
+        status: progress.status,
+        total_chunks: progress.total_chunks,
+        completed_chunks: progress.completed_chunks,
+        progress:
+          if(progress.total_chunks > 0,
+            do: progress.completed_chunks / progress.total_chunks,
+            else: 1.0
+          ),
+        best_reward: progress.best_reward,
+        baseline_reward: progress.baseline_reward,
+        results: chunks,
+        inserted_at: progress.inserted_at,
+        completed_at: progress.completed_at
+      })
+    else
       {:error, :not_found} ->
         send_json(conn, 404, %{error: "batch_not_found"})
     end

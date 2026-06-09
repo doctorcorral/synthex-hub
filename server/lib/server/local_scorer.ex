@@ -314,19 +314,14 @@ defmodule Server.LocalScorer do
   end
 
   defp fetch_completed_items(batch_id) do
-    case Queue.get_batch(batch_id) do
-      {:error, :not_found} ->
-        {:error, "batch #{batch_id} disappeared after completion"}
-
-      {:ok, batch} ->
-        results = batch.results || []
-
-        items =
-          results
-          |> Enum.sort_by(fn chunk -> chunk["chunk_index"] || 0 end)
-          |> Enum.flat_map(fn chunk -> chunk["items"] || [] end)
-
-        {:ok, items}
+    # Items live on oban_jobs.args["results"] (one row per chunk),
+    # not on Batch.results (which is no longer populated — see
+    # `Server.Queue.fetch_batch_chunks/1` for the why). This is a
+    # single indexed read at end-of-batch instead of the old
+    # O(N²) push-and-readback dance.
+    case Queue.fetch_batch_chunks(batch_id) do
+      {:ok, chunks} ->
+        {:ok, Enum.flat_map(chunks, fn c -> c["items"] || [] end)}
     end
   end
 end

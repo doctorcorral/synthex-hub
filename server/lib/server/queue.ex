@@ -210,12 +210,80 @@ defmodule Server.Queue do
     end
   end
 
-  @doc "Look up a batch by id, with progress and (if completed) aggregated results."
+  @doc """
+  Look up a batch by id. Returns the full row including the
+  (legacy) `results` field, which is no longer populated for
+  batches created after the egress-cost rework — use
+  `fetch_batch_items/1` to get per-chunk items instead.
+  """
   def get_batch(batch_id) do
     case Repo.get(Batch, batch_id) do
       nil -> {:error, :not_found}
       batch -> {:ok, batch}
     end
+  end
+
+  @doc """
+  Reassemble per-chunk results for a batch by reading the
+  per-chunk `oban_jobs.args["results"]` rows directly.
+
+  ## Why not `Batch.results`?
+
+  Per-chunk items used to also be pushed onto the `Batch.results`
+  jsonb-array column on every chunk submit. That made *every*
+  chunk completion rewrite the full TOASTed array and pulled the
+  bloated row back over the wire on the immediately-following
+  `Repo.get!(Batch, ...)`. For a 10k-chunk Ant `collect_states`
+  batch, that came out to multi-TB Postgres↔app traffic. Now we
+  store items in exactly one place: on the per-chunk oban_jobs
+  row, written once on completion and read once here.
+
+  ## Return shape
+
+  Returns `{:ok, chunks}` where `chunks` is a list of
+  `%{"chunk_index" => i, "items" => [...]}` maps sorted by
+  chunk_index — the same wire shape the legacy
+  `Batch.results` column held, so external HTTP consumers
+  (`Synthex.Hub.Client`) keep working unchanged. Always
+  returns `{:ok, []}` for batches with zero completed
+  chunks; never returns `{:error, :not_found}` since a
+  missing batch is indistinguishable from a batch with no
+  completed chunks at this layer.
+
+  ## Flat-items convenience
+
+  Callers wanting a flat list across all chunks can do:
+
+      with {:ok, chunks} <- fetch_batch_chunks(batch_id) do
+        Enum.flat_map(chunks, fn c -> c["items"] || [] end)
+      end
+
+  which matches what `LocalScorer.fetch_completed_items/1`
+  used to do against `Batch.results`.
+  """
+  def fetch_batch_chunks(batch_id) when is_binary(batch_id) do
+    rows =
+      from(j in Oban.Job,
+        where:
+          j.worker == ^"Server.BrokerWorker" and
+            fragment("? ->> ?", j.args, ^"batch_id") == ^batch_id and
+            j.state == ^"completed",
+        order_by: [
+          asc: fragment("(? ->> ?)::int", j.args, ^"chunk_index")
+        ],
+        select: %{
+          chunk_index: fragment("(? ->> ?)::int", j.args, ^"chunk_index"),
+          items: fragment("? -> ?", j.args, ^"results")
+        }
+      )
+      |> Repo.all()
+
+    chunks =
+      Enum.map(rows, fn row ->
+        %{"chunk_index" => row.chunk_index, "items" => row.items || []}
+      end)
+
+    {:ok, chunks}
   end
 
   @doc """
@@ -431,13 +499,21 @@ defmodule Server.Queue do
               )
             )
 
+          # NB: we used to also `push: [results: ^...]` into
+          # `Batch.results` here. That's gone. The per-chunk items
+          # are already stored on the owning oban_jobs row in
+          # `args["results"]` (see line ~422 above) — pushing them
+          # a second time into a jsonb-array column was an O(N²)
+          # egress catastrophe, because every push rewrote the
+          # full TOASTed array and the post-write `Repo.get!`
+          # then dragged the bloated row back across the wire.
+          # End-of-batch consumers (LocalScorer, send_full_batch)
+          # now read items from oban_jobs via
+          # `Server.Queue.fetch_batch_items/1`.
           {1, _} =
             from(b in Batch,
               where: b.id == ^batch_id,
-              update: [
-                inc: [completed_chunks: 1],
-                push: [results: ^%{"chunk_index" => chunk_index, "items" => results}]
-              ]
+              update: [inc: [completed_chunks: 1]]
             )
             |> Repo.update_all([])
 
@@ -448,12 +524,25 @@ defmodule Server.Queue do
           # inside the same transaction.
           maybe_update_score_summary(batch_id, job.args["cmd"], chunk_index, results)
 
-          batch = Repo.get!(Batch, batch_id)
-
-          if batch.completed_chunks >= batch.total_chunks do
-            Repo.update!(
-              Batch.changeset(batch, %{status: "completed", completed_at: now})
+          # Targeted SELECT of just the two integers we need to
+          # decide if the batch is now complete. Used to be a full
+          # `Repo.get!(Batch, batch_id)` which pulled the entire
+          # row (including the previously-bloated `results` jsonb
+          # array) — the second half of the O(N²) egress bill.
+          %{completed: completed, total: total} =
+            Repo.one!(
+              from b in Batch,
+                where: b.id == ^batch_id,
+                select: %{completed: b.completed_chunks, total: b.total_chunks}
             )
+
+          if completed >= total do
+            {1, _} =
+              from(b in Batch,
+                where: b.id == ^batch_id,
+                update: [set: [status: "completed", completed_at: ^now]]
+              )
+              |> Repo.update_all([])
           end
 
           if worker_id do
