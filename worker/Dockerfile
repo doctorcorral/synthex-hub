@@ -14,9 +14,20 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# WARP=1 builds a GPU worker: adds warp-lang + mujoco-warp on top of
+# the CPU deps. The warp-lang wheel bundles the CUDA runtime, so this
+# image needs no CUDA base — only the host's NVIDIA driver, injected at
+# `docker run --gpus all` via the nvidia-container-toolkit. The same
+# image still runs plain MuJoCo (CPU) chunks, so a GPU worker is a
+# strict superset.
+ARG WARP=0
+
 COPY environments/gymnasium/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -U pip && \
-    pip install --no-cache-dir -r /app/requirements.txt
+    pip install --no-cache-dir -r /app/requirements.txt && \
+    if [ "$WARP" = "1" ]; then \
+      pip install --no-cache-dir warp-lang mujoco-warp ; \
+    fi
 
 WORKDIR /app
 
