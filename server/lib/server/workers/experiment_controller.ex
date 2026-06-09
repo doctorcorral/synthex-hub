@@ -119,7 +119,7 @@ defmodule Server.Workers.ExperimentController do
 
   @impl Oban.Worker
   def perform(%Oban.Job{id: job_id, args: %{"experiment_id" => exp_id} = args}) do
-    case Experiments.get(exp_id) do
+    case with_db_retry(fn -> Experiments.get(exp_id) end) do
       {:error, :not_found} ->
         {:discard, "experiment not found"}
 
@@ -146,7 +146,15 @@ defmodule Server.Workers.ExperimentController do
   end
 
   defp sweep_orphan_batches!(exp_id) do
-    case Queue.cancel_experiment_in_flight_batches(exp_id) do
+    # Wrapped in with_db_retry: this runs on every controller (re)start,
+    # and a transient Neon SSL recycle here ("ssl recv: closed") used
+    # to kill the whole controller through all 3 Oban attempts — taking
+    # the experiment to a terminal `failed` state over a blip that a
+    # single retry rides out. cancel_experiment_in_flight_batches is a
+    # complete Repo.transaction that releases its connection before the
+    # rescue's Process.sleep runs, and it's idempotent (re-cancelling
+    # already-cancelled batches is a no-op), so retrying is safe.
+    case with_db_retry(fn -> Queue.cancel_experiment_in_flight_batches(exp_id) end) do
       {:ok, %{batches: 0}} ->
         :ok
 
@@ -185,7 +193,7 @@ defmodule Server.Workers.ExperimentController do
 
     mode = if bit_concurrency <= 1, do: "sequential", else: "parallel"
 
-    {:ok, env_policy_start} = EnvPolicies.for_experiment(exp)
+    {:ok, env_policy_start} = with_db_retry(fn -> EnvPolicies.for_experiment(exp) end)
 
     Logger.info(
       "[Controller] #{exp.env_name} step #{cegar_iter}/#{ctx.cegar_rounds} " <>
@@ -682,9 +690,17 @@ defmodule Server.Workers.ExperimentController do
   # cumulative) before propagating; that's enough to ride out
   # the queue_interval window without hard-crashing.
   #
-  # Only wrap small idempotent reads. Repo.transaction blocks
-  # MUST NOT be retried this way — they hold a checked-out
-  # connection across the retry, defeating the purpose.
+  # Wrap idempotent operations only — the retry re-invokes `fun`
+  # from scratch, so any write it performs must be safe to repeat
+  # (re-reads always are; the orphan sweep is too, since
+  # re-cancelling cancelled batches is a no-op).
+  #
+  # It IS safe to wrap a complete `Repo.transaction(...)` call:
+  # the transaction commits-or-rolls-back and releases its
+  # connection before the rescue clause's Process.sleep runs, so
+  # we never hold a checked-out connection across a backoff. What
+  # you must NOT do is the inverse — call with_db_retry INSIDE a
+  # transaction — which would pin the connection across the sleep.
   @retry_backoffs_ms [250, 500, 1500, 3000]
 
   defp with_db_retry(fun) do
