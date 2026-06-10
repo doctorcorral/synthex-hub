@@ -65,6 +65,15 @@ class CpuBackend:
         qvel = np.array([d.qvel for d in self.datas], dtype=np.float64)
         return qpos, qvel
 
+    def read_fields(self, names):
+        # Batch arbitrary MjData fields across worlds, e.g. "site_xpos"
+        # (N, nsite, 3) or "qfrc_constraint" (N, nv). Used by env specs
+        # whose reward/obs depend on derived quantities not in qpos/qvel.
+        out = {}
+        for nm in names:
+            out[nm] = np.array([getattr(d, nm) for d in self.datas], dtype=np.float64)
+        return out
+
 
 # ── Warp backend (mujoco_warp, batched on GPU) ──────────────────────
 
@@ -144,6 +153,17 @@ class WarpBackend:
             qpos = self.d.qpos.numpy().astype(np.float64)
             qvel = self.d.qvel.numpy().astype(np.float64)
         return qpos, qvel
+
+    def read_fields(self, names):
+        # Same contract as CpuBackend.read_fields, reading the batched
+        # mujoco_warp Data arrays (leading world axis) back to host.
+        # mujoco_warp mirrors MjData field names, so "site_xpos" /
+        # "qfrc_constraint" resolve directly.
+        out = {}
+        with self._wp.ScopedDevice(self.device):
+            for nm in names:
+                out[nm] = getattr(self.d, nm).numpy().astype(np.float64)
+        return out
 
 
 # ── Backend selection ───────────────────────────────────────────────

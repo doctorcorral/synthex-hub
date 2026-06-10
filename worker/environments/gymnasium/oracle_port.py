@@ -85,6 +85,12 @@ def eval_feature(feat, state):
             + state[feat[3]]
             < 0
         )
+    # Canonical sin/cos-axis semantics (matches Synthex core + the
+    # synthex-imitation oracles): sin(obs[dim]) < t, cos(obs[dim]) < t.
+    if kind == "sin_axis":
+        return np.sin(state[feat[1]]) < feat[2]
+    if kind == "cos_axis":
+        return np.cos(state[feat[1]]) < feat[2]
     return False
 
 

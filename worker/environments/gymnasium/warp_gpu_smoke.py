@@ -34,26 +34,32 @@ BIT_PREDS = [
 ]
 
 
+def _read_state(backend, needs):
+    qpos, qvel = backend.get_state()
+    extras = backend.read_fields(needs) if needs else {}
+    return {"qpos": qpos, "qvel": qvel, "extras": extras}
+
+
 def rollout(backend, spec, iqp, iqv, seeds, max_steps):
     n = len(seeds)
+    needs = spec.get("needs", [])
     qpos, qvel = core.reset_states(ENV, seeds, iqp, iqv)
     backend.set_state(qpos, qvel)
-    qp, qv = backend.get_state()
-    obs = spec["obs_fn"](qp, qv)
+    state = _read_state(backend, needs)
+    obs = spec["obs_fn"](state)
     ep = np.zeros(n, dtype=np.float64)
     done = np.zeros(n, dtype=bool)
     fs = spec["frame_skip"]
     for _ in range(max_steps):
         bits = core.policy_bits(obs, BIT_PREDS, N_BITS)
         actions = core.decode_actions(bits, spec, BITS_PER_DIM)
-        xb = qp[:, spec["x_index"]].copy()
+        prev_state = state
         backend.set_ctrl(actions)
         backend.step(fs)
-        qp, qv = backend.get_state()
-        xa = qp[:, spec["x_index"]]
-        ep += np.where(done, 0.0, spec["reward_fn"](xb, xa, actions))
-        obs = spec["obs_fn"](qp, qv)
-        done = done | spec["terminated_fn"](qp, qv)
+        state = _read_state(backend, needs)
+        ep += np.where(done, 0.0, spec["reward_fn"](prev_state, state, actions))
+        obs = spec["obs_fn"](state)
+        done = done | spec["terminated_fn"](state)
         if done.all():
             break
     return ep

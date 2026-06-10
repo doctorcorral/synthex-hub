@@ -1,0 +1,21 @@
+{
+  "env_key": "inverted_double_pendulum",
+  "env_name": "InvertedDoublePendulum-warp-v5",
+  "config": {
+    "adapter": "mujoco_warp",
+    "bits_per_dim": 4,
+    "depth": 1,
+    "max_coeff": 5,
+    "tridiag_max_coeff": 2,
+    "feature_types": ["axis", "tridiag", "sin_axis", "cos_axis"],
+    "n_episodes": 30,
+    "top_k": 20,
+    "max_iters": 5,
+    "cegar_rounds": 3,
+    "max_steps": 1000,
+    "chunk_size": 128,
+    "collect_states_chunk_size": 128,
+    "state_stride": 10,
+    "poll_interval_ms": 5000
+  }
+}

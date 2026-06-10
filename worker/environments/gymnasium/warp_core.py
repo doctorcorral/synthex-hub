@@ -68,6 +68,13 @@ def eval_feature_batch(feat, obs):
             + obs[:, feat[3]]
             < 0
         )
+    # Canonical sin/cos-axis semantics, vectorised over the world axis:
+    # sin(obs[dim]) < t, cos(obs[dim]) < t. Matches oracle_port.eval_feature
+    # and Synthex core's :sin_axis / :cos_axis generators.
+    if kind == "sin_axis":
+        return np.sin(obs[:, feat[1]]) < feat[2]
+    if kind == "cos_axis":
+        return np.cos(obs[:, feat[1]]) < feat[2]
     return np.zeros(obs.shape[0], dtype=bool)
 
 
@@ -98,18 +105,30 @@ def eval_pred_batch(pred, obs):
 # gives us the physics). We reimplement those rules here, vectorised.
 
 
-def _obs_exclude_x(qpos, qvel):
+#
+# Env-rule functions take a `state` dict so reward/obs/termination can
+# depend on derived quantities (site positions, constraint forces) that
+# live outside qpos/qvel:
+#     state = {"qpos": (N,nq), "qvel": (N,nv), "extras": {name: array}}
+# `extras` is populated by the rollout from the backend's read_fields
+# for whatever the spec declares in "needs".
+
+
+def _obs_exclude_x(state):
     # qpos[:, 1:] drops the root x-slide, matching
     # exclude_current_positions_from_observation=True.
+    qpos, qvel = state["qpos"], state["qvel"]
     return np.concatenate([qpos[:, 1:], qvel], axis=1)
 
 
-def _obs_full(qpos, qvel):
-    return np.concatenate([qpos, qvel], axis=1)
+def _obs_full(state):
+    return np.concatenate([state["qpos"], state["qvel"]], axis=1)
 
 
-def _forward_reward(weight, ctrl_weight, dt):
-    def reward(x_before, x_after, ctrl):
+def _forward_reward(weight, ctrl_weight, dt, x_index):
+    def reward(prev, cur, ctrl):
+        x_before = prev["qpos"][:, x_index]
+        x_after = cur["qpos"][:, x_index]
         forward = weight * (x_after - x_before) / dt
         ctrl_cost = ctrl_weight * np.sum(np.square(ctrl), axis=1)
         return forward - ctrl_cost
@@ -117,14 +136,15 @@ def _forward_reward(weight, ctrl_weight, dt):
     return reward
 
 
-def _never_terminates(qpos, qvel):
-    return np.zeros(qpos.shape[0], dtype=bool)
+def _never_terminates(state):
+    return np.zeros(state["qpos"].shape[0], dtype=bool)
 
 
 def _z_angle_healthy(z_idx, z_lo, z_hi, ang_idx, ang_lo, ang_hi):
     # Hopper/Walker-style healthy check: root height in [z_lo, z_hi]
     # and torso angle in [ang_lo, ang_hi]; terminate when unhealthy.
-    def terminated(qpos, qvel):
+    def terminated(state):
+        qpos = state["qpos"]
         z = qpos[:, z_idx]
         ang = qpos[:, ang_idx]
         healthy = (z > z_lo) & (z < z_hi) & (ang > ang_lo) & (ang < ang_hi)
@@ -134,24 +154,68 @@ def _z_angle_healthy(z_idx, z_lo, z_hi, ang_idx, ang_lo, ang_hi):
 
 
 def _z_healthy(z_idx, z_lo, z_hi):
-    def terminated(qpos, qvel):
-        z = qpos[:, z_idx]
+    def terminated(state):
+        z = state["qpos"][:, z_idx]
         return ~((z >= z_lo) & (z <= z_hi))
 
     return terminated
 
 
+# ── InvertedDoublePendulum-v5: tip-based reward/termination. The pole
+#    tip Cartesian position (site_xpos) and the constraint force
+#    (qfrc_constraint, obs[8]) are NOT in qpos/qvel, so this spec
+#    declares them in "needs" and the backend batches them each step.
+
+
+def _idp_obs(state):
+    # Matches Gymnasium InvertedDoublePendulum._get_obs exactly:
+    #   [cart_x, sin(θ1,θ2), cos(θ1,θ2), clip(qvel,-10,10),
+    #    clip(qfrc_constraint,-10,10)[:1]]
+    qpos, qvel = state["qpos"], state["qvel"]
+    qfrc = state["extras"]["qfrc_constraint"]  # (N, nv)
+    return np.concatenate(
+        [
+            qpos[:, :1],
+            np.sin(qpos[:, 1:]),
+            np.cos(qpos[:, 1:]),
+            np.clip(qvel, -10.0, 10.0),
+            np.clip(qfrc[:, :1], -10.0, 10.0),
+        ],
+        axis=1,
+    )
+
+
+def _idp_reward(prev, cur, ctrl):
+    # Gymnasium IDP reward, vectorised. The tip Cartesian (x, y=height)
+    # comes from the "tip" site; v1,v2 are the two hinge velocities.
+    site = cur["extras"]["site_xpos"]  # (N, nsite, 3)
+    x = site[:, 0, 0]
+    y = site[:, 0, 2]
+    v1 = cur["qvel"][:, 1]
+    v2 = cur["qvel"][:, 2]
+    dist_penalty = 0.01 * x ** 2 + (y - 2.0) ** 2
+    vel_penalty = 1e-3 * v1 ** 2 + 5e-3 * v2 ** 2
+    terminated = y <= 1.0
+    alive_bonus = np.where(terminated, 0.0, 10.0)
+    return alive_bonus - dist_penalty - vel_penalty
+
+
+def _idp_terminated(state):
+    y = state["extras"]["site_xpos"][:, 0, 2]
+    return y <= 1.0
+
+
 # spec fields:
 #   base_env      Gymnasium id to source the model + init pose from
 #   frame_skip    physics substeps per policy action
-#   dt            frame_skip * model.opt.timestep (for forward reward)
+#   dt            frame_skip * model.opt.timestep (cached at load)
 #   n_action_dims actuator count
 #   action_low/high  symmetric action clamp the bit-policy decodes into
-#   x_index       qpos index used for forward progress (root x-slide)
-#   obs_fn(qpos,qvel) -> (N, obs_dim)
-#   reward_fn(x_before, x_after, ctrl) -> (N,)
-#   terminated_fn(qpos, qvel) -> (N,) bool
-#   success_threshold  episode-return cutoff counted as a "landing"
+#   needs         extra MjData fields to batch each step (default [])
+#   obs_fn(state) -> (N, obs_dim)
+#   reward_fn(prev_state, state, ctrl) -> (N,)
+#   terminated_fn(state) -> (N,) bool
+#   success_threshold  episode-return cutoff counted as a "success"
 ENV_SPECS = {
     "HalfCheetah-warp-v5": {
         "base_env": "HalfCheetah-v5",
@@ -159,11 +223,24 @@ ENV_SPECS = {
         "n_action_dims": 6,
         "action_low": -1.0,
         "action_high": 1.0,
-        "x_index": 0,
+        "needs": [],
         "obs_fn": _obs_exclude_x,
-        "reward_fn": _forward_reward(1.0, 0.1, 0.05),
+        "reward_fn": _forward_reward(1.0, 0.1, 0.05, 0),
         "terminated_fn": _never_terminates,
         "success_threshold": 1000.0,
+        "reset_noise_scale": 0.1,
+    },
+    "InvertedDoublePendulum-warp-v5": {
+        "base_env": "InvertedDoublePendulum-v5",
+        "frame_skip": 5,
+        "n_action_dims": 1,
+        "action_low": -1.0,
+        "action_high": 1.0,
+        "needs": ["site_xpos", "qfrc_constraint"],
+        "obs_fn": _idp_obs,
+        "reward_fn": _idp_reward,
+        "terminated_fn": _idp_terminated,
+        "success_threshold": 9100.0,
         "reset_noise_scale": 0.1,
     },
 }

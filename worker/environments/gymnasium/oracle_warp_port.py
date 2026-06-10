@@ -90,6 +90,14 @@ def get_backend(env_name, nworld):
 # ── Batched rollout ─────────────────────────────────────────────────
 
 
+def _read_state(b, needs):
+    """Snapshot the backend into the state dict the env-rule functions
+    consume: qpos/qvel plus any derived `needs` (e.g. site_xpos)."""
+    qpos, qvel = b.get_state()
+    extras = b.read_fields(needs) if needs else {}
+    return {"qpos": qpos, "qvel": qvel, "extras": extras}
+
+
 def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
             record_stride=None):
     """Advance `len(seeds)` worlds under per-world bit-policies.
@@ -103,14 +111,15 @@ def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
     _, iqp, iqv = get_model(env_name)
     n = len(seeds)
     fs = spec["frame_skip"]
+    needs = spec.get("needs", [])
     n_bits = spec["n_action_dims"] * bits_per_dim
 
     qpos, qvel = core.reset_states(env_name, seeds, iqp, iqv)
     b = get_backend(env_name, n)
     b.set_state(qpos, qvel)
 
-    qp, qv = b.get_state()
-    obs = spec["obs_fn"](qp, qv)
+    state = _read_state(b, needs)
+    obs = spec["obs_fn"](state)
 
     ep_return = np.zeros(n, dtype=np.float64)
     done = np.zeros(n, dtype=bool)
@@ -125,19 +134,18 @@ def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
         bits = core.policy_bits(obs, bit_preds_per_world, n_bits)
         actions = core.decode_actions(bits, spec, bits_per_dim)
 
-        x_before = qp[:, spec["x_index"]].copy()
+        prev_state = state
         b.set_ctrl(actions)
         b.step(fs)
-        qp, qv = b.get_state()
-        x_after = qp[:, spec["x_index"]]
+        state = _read_state(b, needs)
 
-        step_r = spec["reward_fn"](x_before, x_after, actions)
+        step_r = spec["reward_fn"](prev_state, state, actions)
         # Reward only accrues to still-live worlds; the terminating
         # step itself is counted (we mark done AFTER adding it).
         ep_return += np.where(done, 0.0, step_r)
 
-        obs = spec["obs_fn"](qp, qv)
-        newly = spec["terminated_fn"](qp, qv)
+        obs = spec["obs_fn"](state)
+        newly = spec["terminated_fn"](state)
         done = done | newly
         if done.all():
             break

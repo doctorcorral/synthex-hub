@@ -328,7 +328,9 @@ defmodule Server.Workers.ExperimentBootstrap do
     "diag" => :diag,
     "sq_diag" => :sq_diag,
     "prod" => :prod,
-    "tridiag" => :tridiag
+    "tridiag" => :tridiag,
+    "sin_axis" => :sin_axis,
+    "cos_axis" => :cos_axis
   }
 
   defp feature_types(list) when is_list(list) do
