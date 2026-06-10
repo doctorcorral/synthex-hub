@@ -264,26 +264,35 @@ def policy_bits(obs, bit_preds_per_world, n_bits):
 class _PerWorld:
     """Wraps a length-N list of predicates, grouping identical ones so
     `policy_bits` evaluates each distinct predicate once over its
-    world-index block rather than per world."""
+    world-index block rather than per world.
+
+    The grouping is STATIC for the lifetime of a rollout (the per-world
+    predicate assignment never changes between steps), so it is computed
+    once and cached. Recomputing it per step was an O(N) `json.dumps`
+    storm — millions of calls per chunk — that dwarfed the GPU physics
+    and pinned throughput to CPU-fallback levels."""
 
     def __init__(self, preds_per_world):
         self._preds = preds_per_world
+        self._groups = None
 
     def groups(self):
-        # Group contiguous/identical predicates by their JSON identity.
-        import json
+        if self._groups is None:
+            import json
 
-        buckets = {}
-        order = []
-        for i, p in enumerate(self._preds):
-            key = json.dumps(p, sort_keys=True)
-            if key not in buckets:
-                buckets[key] = (p, [])
-                order.append(key)
-            buckets[key][1].append(i)
-        for key in order:
-            pred, idxs = buckets[key]
-            yield pred, np.array(idxs, dtype=np.intp)
+            buckets = {}
+            order = []
+            for i, p in enumerate(self._preds):
+                key = json.dumps(p, sort_keys=True)
+                if key not in buckets:
+                    buckets[key] = (p, [])
+                    order.append(key)
+                buckets[key][1].append(i)
+            self._groups = [
+                (buckets[key][0], np.array(buckets[key][1], dtype=np.intp))
+                for key in order
+            ]
+        return self._groups
 
 
 def per_world(preds_per_world):

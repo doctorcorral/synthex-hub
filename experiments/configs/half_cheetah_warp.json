@@ -1,0 +1,20 @@
+{
+  "env_key": "half_cheetah",
+  "env_name": "HalfCheetah-warp-v5",
+  "config": {
+    "adapter": "mujoco_warp",
+    "bits_per_dim": 3,
+    "depth": 1,
+    "max_coeff": 5,
+    "feature_types": ["axis", "diag", "sq_diag", "prod"],
+    "n_episodes": 30,
+    "top_k": 20,
+    "max_iters": 5,
+    "cegar_rounds": 3,
+    "max_steps": 1000,
+    "chunk_size": 128,
+    "collect_states_chunk_size": 128,
+    "state_stride": 10,
+    "poll_interval_ms": 5000
+  }
+}
