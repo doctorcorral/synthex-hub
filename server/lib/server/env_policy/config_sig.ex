@@ -76,7 +76,9 @@ defmodule Server.EnvPolicy.ConfigSig do
     "diag" => "diag",
     "sq_diag" => "sq_diag",
     "prod" => "prod",
-    "tridiag" => "tridiag"
+    "tridiag" => "tridiag",
+    "sin_axis" => "sin_axis",
+    "cos_axis" => "cos_axis"
   }
 
   @doc """
