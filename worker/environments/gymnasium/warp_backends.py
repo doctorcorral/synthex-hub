@@ -118,6 +118,17 @@ class WarpBackend:
         src = wp.array(np.ascontiguousarray(arr), dtype=field.dtype, device=self.device)
         wp.copy(field, src)
 
+    def _snapshot_fields(self, names):
+        snap = {}
+        for nm in names:
+            if hasattr(self.d, nm):
+                snap[nm] = getattr(self.d, nm).numpy().copy()
+        return snap
+
+    def _restore_fields(self, snap):
+        for nm, arr in snap.items():
+            self._assign(getattr(self.d, nm), arr)
+
     def set_state(self, qpos, qvel):
         wp = self._wp
         mjw = self._mjw
@@ -153,7 +164,16 @@ class WarpBackend:
             # d.ctrl lives in device memory and is read by the captured
             # kernels, so updating it between launches (set_ctrl) feeds
             # new actions without re-capturing.
+            #
+            # The warmup step mutates Data. Snapshot and restore the live
+            # rollout inputs so the first graph-backed step is exactly
+            # `frame_skip` physics steps, not `frame_skip + 1`.
+            snap = self._snapshot_fields(
+                ("qpos", "qvel", "ctrl", "act", "qacc_warmstart", "time")
+            )
             mjw.step(self.m, self.d)
+            self._restore_fields(snap)
+            mjw.forward(self.m, self.d)
             with wp.ScopedCapture() as cap:
                 for _ in range(frame_skip):
                     mjw.step(self.m, self.d)
