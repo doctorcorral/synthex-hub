@@ -19,7 +19,14 @@ same policy from the same seed agree up to solver numerics.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
+
+# Inherits the oracle's logging config (same process), so these land in
+# ORACLE_LOG (/tmp/synthex_hub_warp_worker.log) alongside the oracle's
+# own lines.
+_log = logging.getLogger("warp_backends")
 
 
 # ── CPU backend (plain mujoco) ──────────────────────────────────────
@@ -164,11 +171,28 @@ def make_backend(model, nworld, prefer="auto", use_graph=True):
     if prefer == "cpu":
         return CpuBackend(model, nworld)
     if prefer == "warp":
+        # Forced GPU: do NOT swallow — let the real error surface so a
+        # misconfigured "warp" worker fails loudly instead of silently
+        # grinding on the CPU.
         return WarpBackend(model, nworld, use_graph=use_graph)
     # auto
-    if warp_available():
-        try:
-            return WarpBackend(model, nworld, use_graph=use_graph)
-        except Exception:
-            return CpuBackend(model, nworld)
-    return CpuBackend(model, nworld)
+    if not warp_available():
+        _log.warning(
+            "make_backend(auto): warp_available() is False — using CPU "
+            "backend for nworld=%d. (No CUDA device visible to Warp.)",
+            nworld,
+        )
+        return CpuBackend(model, nworld)
+    try:
+        return WarpBackend(model, nworld, use_graph=use_graph)
+    except Exception:
+        # The silent version of this fallback is exactly what masked a
+        # GPU worker quietly running every chunk on a single CPU core
+        # (correct, but ~50x slower). Log the full traceback so the
+        # reason is visible in ORACLE_LOG rather than invisible.
+        _log.exception(
+            "make_backend(auto): WarpBackend(nworld=%d) construction FAILED; "
+            "falling back to CPU backend (this chunk will run ~50x slower).",
+            nworld,
+        )
+        return CpuBackend(model, nworld)
