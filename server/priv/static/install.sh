@@ -473,12 +473,15 @@ fi
 if [ "$WARP" = 1 ]; then
   hr
   printf >&2 '%s\n' "Running GPU self-test (compiling CUDA kernels — first run ~1-2 min)..."
+  # With no env args the self-test sweeps a default set (HalfCheetah +
+  # InvertedDoublePendulum) and checks WARP reward parity against CPU for
+  # each, so a "GPU steps but returns wrong rewards" regression fails HERE
+  # instead of silently producing null runs.
   if docker exec "$CONTAINER_NAME" \
        python3 /app/environments/gymnasium/warp_selftest.py >&2 2>&1; then
-    ok "GPU self-test ${C_BOLD}PASSED${C_RESET}${C_GREEN} — this worker runs MuJoCo-Warp on the GPU.${C_RESET}"
+    ok "GPU self-test ${C_BOLD}PASSED${C_RESET}${C_GREEN} — this worker runs MuJoCo-Warp on the GPU with correct rewards.${C_RESET}"
   else
-    warn "GPU self-test ${C_BOLD}FAILED${C_RESET} — this worker would run on CPU (~50x slower)."
-    warn "The cause is the [warp-backend] / traceback line printed just above."
+    warn "GPU self-test ${C_BOLD}FAILED${C_RESET} — see the SELFTEST/[warp-backend] line(s) above."
     warn "Fix that, then re-run this installer to re-test."
   fi
 fi
