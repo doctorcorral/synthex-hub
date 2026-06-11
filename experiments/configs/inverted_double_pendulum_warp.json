@@ -13,8 +13,8 @@
     "max_iters": 5,
     "cegar_rounds": 3,
     "max_steps": 1000,
-    "chunk_size": 128,
-    "collect_states_chunk_size": 128,
+    "chunk_size": 2048,
+    "collect_states_chunk_size": 4096,
     "state_stride": 10,
     "poll_interval_ms": 5000
   }
