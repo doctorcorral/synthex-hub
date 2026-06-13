@@ -39,6 +39,15 @@ ENV_CONFIGS = {
         "n_action_dims": 1, "action_low": -3.0, "action_high": 3.0,
         "max_steps": 1000, "success_threshold": 950,
     },
+    # Classic-control Pendulum swing-up (not MuJoCo). obs = [cos, sin,
+    # angular velocity]; single torque actuator in [-2, 2]; 200-step
+    # episodes. Per-step reward in ~[-16.27, 0], so a swing-up-and-hold
+    # policy totals roughly -150 to -250; success_threshold marks a
+    # cleanly held balance.
+    "Pendulum-v1": {
+        "n_action_dims": 1, "action_low": -2.0, "action_high": 2.0,
+        "max_steps": 200, "success_threshold": -250,
+    },
     # Gymnasium 1.x InvertedDoublePendulum-v5: 9-dim obs (matches the
     # Warp lineage's layout), single normalized actuator in [-1, 1].
     # Reward ~9-10/step alive bonus minus distance/velocity penalties;
