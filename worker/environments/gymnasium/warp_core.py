@@ -108,6 +108,14 @@ def _obs_exclude_x(state):
     return np.concatenate([qpos[:, 1:], qvel], axis=1)
 
 
+def _obs_exclude_xy(state):
+    # qpos[:, 2:] drops the root x/y slides (Ant/Humanoid-style
+    # exclude_current_positions_from_observation=True), keeping the
+    # torso z + orientation quaternion + joint angles, then qvel.
+    qpos, qvel = state["qpos"], state["qvel"]
+    return np.concatenate([qpos[:, 2:], qvel], axis=1)
+
+
 def _obs_full(state):
     return np.concatenate([state["qpos"], state["qvel"]], axis=1)
 
@@ -119,6 +127,24 @@ def _forward_reward(weight, ctrl_weight, dt, x_index):
         forward = weight * (x_after - x_before) / dt
         ctrl_cost = ctrl_weight * np.sum(np.square(ctrl), axis=1)
         return forward - ctrl_cost
+
+    return reward
+
+
+def _ant_reward(dt, ctrl_weight, healthy_reward, z_lo, z_hi):
+    # Ant-v5 reward, minus the (small, default 5e-4) contact-cost term —
+    # contact_cost needs cfrc_ext, which we deliberately omit so this
+    # Warp env stays a clean, self-contained physics task:
+    #   forward_x_velocity + healthy_bonus - ctrl_cost.
+    def reward(prev, cur, ctrl):
+        x_before = prev["qpos"][:, 0]
+        x_after = cur["qpos"][:, 0]
+        forward = (x_after - x_before) / dt
+        ctrl_cost = ctrl_weight * np.sum(np.square(ctrl), axis=1)
+        z = cur["qpos"][:, 2]
+        healthy = (z >= z_lo) & (z <= z_hi)
+        alive = np.where(healthy, healthy_reward, 0.0)
+        return forward + alive - ctrl_cost
 
     return reward
 
@@ -228,6 +254,22 @@ ENV_SPECS = {
         "reward_fn": _idp_reward,
         "terminated_fn": _idp_terminated,
         "success_threshold": 9100.0,
+        "reset_noise_scale": 0.1,
+    },
+    # Ant: 8 actuators, obs = qpos[2:]=13 + qvel=14 = 27 (no contact
+    # forces). Reward = forward x-velocity + healthy bonus - ctrl cost;
+    # terminate when torso z leaves [0.2, 1.0]. dt = 5 * 0.01 = 0.05.
+    "Ant-warp-v5": {
+        "base_env": "Ant-v5",
+        "frame_skip": 5,
+        "n_action_dims": 8,
+        "action_low": -1.0,
+        "action_high": 1.0,
+        "needs": [],
+        "obs_fn": _obs_exclude_xy,
+        "reward_fn": _ant_reward(0.05, 0.5, 1.0, 0.2, 1.0),
+        "terminated_fn": _z_healthy(2, 0.2, 1.0),
+        "success_threshold": 1000.0,
         "reset_noise_scale": 0.1,
     },
 }
