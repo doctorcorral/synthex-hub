@@ -418,14 +418,14 @@ defmodule Server.Workers.ExperimentController do
             {{nc, ns, ni + 1, nf},
              %{a | settled_at: Map.put(a.settled_at, bit_idx, v_current)}}
 
-          {:improved, candidate, reward} ->
+          {:improved, candidate, reward, baseline} ->
             debug_bit_verdict(
               exp_id, exp_now.env_name, bit_idx, "improved",
               reward, v_current, env_policy_now.best_reward
             )
 
             apply_commit(
-              {bit_idx, candidate, reward},
+              {bit_idx, candidate, reward, baseline},
               {nc, ns, ni, nf},
               a,
               exp_id,
@@ -531,9 +531,9 @@ defmodule Server.Workers.ExperimentController do
           :no_improvement ->
             {{nc, ns, ni + 1, nf}, %{a | settled_at: Map.put(a.settled_at, bit_idx, v_start)}}
 
-          {:improved, candidate, reward} ->
+          {:improved, candidate, reward, baseline} ->
             apply_commit(
-              {bit_idx, candidate, reward},
+              {bit_idx, candidate, reward, baseline},
               {nc, ns, ni, nf},
               a,
               exp_id,
@@ -559,7 +559,7 @@ defmodule Server.Workers.ExperimentController do
   end
 
   defp apply_commit(
-         {bit_idx, candidate, reward},
+         {bit_idx, candidate, reward, baseline},
          {nc, ns, ni, nf},
          a,
          exp_id,
@@ -575,11 +575,13 @@ defmodule Server.Workers.ExperimentController do
         bit_idx: bit_idx,
         candidate_term: PrettyPrint.to_json_term(candidate),
         reward: reward,
+        fresh_baseline: baseline,
         evaluated_at_version: v_start,
         acceptance_epsilon: epsilon,
         metadata: %{
           "cegar_iter" => cegar_iter,
-          "wave" => wave_num
+          "wave" => wave_num,
+          "fresh_baseline" => baseline
         }
       )
 

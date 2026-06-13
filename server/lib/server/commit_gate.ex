@@ -15,11 +15,17 @@ defmodule Server.CommitGate do
        *stale* and silently discarded.
 
     2. **Monotone policy improvement**: the candidate's reward must
-       exceed `env_policy.best_reward` by at least
-       `acceptance_epsilon`. Under version-reject (1), the candidate
-       was evaluated against the *current* policy's seeds, so this
-       comparison is on the same seed set as the running best —
-       strict policy-level monotonicity follows by construction.
+       exceed its `:fresh_baseline` — the current predicate vector
+       re-measured in the SAME scoring batch, on the SAME seeds, under
+       the SAME n_episodes — by at least `acceptance_epsilon`. This is
+       a true same-seed comparison, so strict policy-level
+       monotonicity follows by construction. We deliberately do NOT
+       compare against the stored `best_reward`: that value is a
+       cross-seed high-water-mark, inflated by max-selection over
+       thousands of noisy candidates and miscalibrated when a later
+       session changes n_episodes. Comparing against it freezes a
+       lineage forever the moment one lucky draw commits. When no fresh
+       baseline is supplied the gate falls back to `best_reward`.
 
     3. **Atomic bump + audit**: on success the env_policy row's
        predicates, `policy_version`, `best_reward` are bumped, the
@@ -77,9 +83,14 @@ defmodule Server.CommitGate do
     * `:bit_idx`             — which bit slot the candidate replaces.
     * `:candidate_term`      — the predicate, in `PrettyPrint.to_json_term/1`
                                form (already serialized).
-    * `:reward`              — the candidate's mean reward as measured
-                               against `evaluated_at_version`'s
-                               predicates.
+    * `:reward`              — the candidate's reward (summed over the
+                               batch seeds) as measured against
+                               `evaluated_at_version`'s predicates.
+    * `:fresh_baseline`      — optional. The current predicate vector's
+                               reward measured in the SAME batch on the
+                               SAME seeds. Used as the same-seed
+                               monotonicity reference. When absent the
+                               gate falls back to `best_reward`.
     * `:evaluated_at_version` — the `policy_version` the worker saw
                                when it produced this candidate. The
                                gate compares against the env_policy's
@@ -118,6 +129,7 @@ defmodule Server.CommitGate do
     reward = Keyword.fetch!(opts, :reward)
     evaluated_at_version = Keyword.fetch!(opts, :evaluated_at_version)
     epsilon = Keyword.get(opts, :acceptance_epsilon, 0.0)
+    fresh_baseline = Keyword.get(opts, :fresh_baseline)
     worker_id = Keyword.get(opts, :worker_id)
     metadata = Keyword.get(opts, :metadata, %{})
 
@@ -147,6 +159,7 @@ defmodule Server.CommitGate do
                 bit_idx: bit_idx,
                 candidate_term: candidate_term,
                 reward: reward,
+                fresh_baseline: fresh_baseline,
                 evaluated_at_version: evaluated_at_version,
                 acceptance_epsilon: epsilon,
                 worker_id: worker_id,
@@ -181,16 +194,36 @@ defmodule Server.CommitGate do
     bit_idx = Keyword.fetch!(opts, :bit_idx)
     candidate_term = Keyword.fetch!(opts, :candidate_term)
     reward = Keyword.fetch!(opts, :reward) * 1.0
+    fresh_baseline = Keyword.get(opts, :fresh_baseline)
     evaluated_at_version = Keyword.fetch!(opts, :evaluated_at_version)
     epsilon = Keyword.fetch!(opts, :acceptance_epsilon)
     worker_id = Keyword.get(opts, :worker_id)
     metadata = Keyword.fetch!(opts, :metadata)
 
+    # Reference for the monotonicity check. Prefer the candidate's
+    # *same-seed* fresh baseline — the current predicate vector
+    # re-measured in the SAME scoring batch, on the SAME seeds, under
+    # the SAME n_episodes as the candidate. That is the only honest
+    # apples-to-apples comparison. The stored `best_reward` is a
+    # cross-seed high-water-mark: inflated by max-selection over
+    # thousands of candidates and miscalibrated whenever a later
+    # session changes n_episodes (the sum-domain reward scales with
+    # episode count). Comparing against it freezes a lineage the moment
+    # a lucky draw is committed — every genuinely-improving candidate is
+    # rejected against an unreproducible record. Fall back to
+    # `best_reward` only when no fresh baseline was supplied (older
+    # callers / degenerate batches).
+    reference =
+      case fresh_baseline do
+        b when is_number(b) -> b
+        _ -> env_policy.best_reward
+      end
+
     cond do
       evaluated_at_version != env_policy.policy_version ->
         Repo.rollback({:rejected, :stale})
 
-      not improves_policy?(env_policy.best_reward, reward, epsilon) ->
+      not improves_policy?(reference, reward, epsilon) ->
         Repo.rollback({:rejected, :no_improvement})
 
       true ->
