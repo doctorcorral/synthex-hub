@@ -23,6 +23,8 @@ import traceback
 import numpy as np
 import gymnasium as gym
 
+from feature_kernels import FEATURE_KERNELS
+
 LOG_PATH = os.environ.get("ORACLE_LOG", "/tmp/synthex_hub_worker.log")
 logging.basicConfig(
     filename=LOG_PATH,
@@ -36,6 +38,14 @@ ENV_CONFIGS = {
     "InvertedPendulum-v5": {
         "n_action_dims": 1, "action_low": -3.0, "action_high": 3.0,
         "max_steps": 1000, "success_threshold": 950,
+    },
+    # Gymnasium 1.x InvertedDoublePendulum-v5: 9-dim obs (matches the
+    # Warp lineage's layout), single normalized actuator in [-1, 1].
+    # Reward ~9-10/step alive bonus minus distance/velocity penalties;
+    # a balanced episode tops out near 9300.
+    "InvertedDoublePendulum-v5": {
+        "n_action_dims": 1, "action_low": -1.0, "action_high": 1.0,
+        "max_steps": 1000, "success_threshold": 9000,
     },
     "Swimmer-v5": {
         "n_action_dims": 2, "action_low": -1.0, "action_high": 1.0,
@@ -69,29 +79,13 @@ ENV_CONFIGS = {
 
 
 def eval_feature(feat, state):
-    kind = feat[0]
-    if kind == "axis":
-        return state[feat[1]] < feat[2]
-    if kind == "diag":
-        return feat[3] * state[feat[1]] + state[feat[2]] < 0
-    if kind == "sq_diag":
-        return feat[3] * state[feat[1]] ** 2 + state[feat[2]] < 0
-    if kind == "prod":
-        return state[feat[1]] * state[feat[2]] < feat[3]
-    if kind == "tridiag":
-        return (
-            feat[4] * state[feat[1]]
-            + feat[5] * state[feat[2]]
-            + state[feat[3]]
-            < 0
-        )
-    # Canonical sin/cos-axis semantics (matches Synthex core + the
-    # synthex-imitation oracles): sin(obs[dim]) < t, cos(obs[dim]) < t.
-    if kind == "sin_axis":
-        return np.sin(state[feat[1]]) < feat[2]
-    if kind == "cos_axis":
-        return np.cos(state[feat[1]]) < feat[2]
-    return False
+    # Single state: column accessor returns a scalar. Feature semantics
+    # live in the shared registry (feature_kernels) so the CPU and GPU
+    # oracles can never drift apart. See feature_kernels.py.
+    kern = FEATURE_KERNELS.get(feat[0])
+    if kern is None:
+        return False
+    return bool(kern(feat, lambda i: state[i]))
 
 
 def eval_pred(pred, state):

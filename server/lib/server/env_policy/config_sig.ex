@@ -78,7 +78,9 @@ defmodule Server.EnvPolicy.ConfigSig do
     "prod" => "prod",
     "tridiag" => "tridiag",
     "sin_axis" => "sin_axis",
-    "cos_axis" => "cos_axis"
+    "cos_axis" => "cos_axis",
+    "wavelet_box" => "wavelet_box",
+    "wavelet_ricker" => "wavelet_ricker"
   }
 
   @doc """

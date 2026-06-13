@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from feature_kernels import FEATURE_KERNELS
+
 try:  # gymnasium is only needed to source the MJCF model + init pose
     import gymnasium as gym
     from gymnasium.utils import seeding
@@ -52,30 +54,15 @@ except Exception:  # pragma: no cover - surfaced lazily in load_model
 
 
 def eval_feature_batch(feat, obs):
-    kind = feat[0]
-    if kind == "axis":
-        return obs[:, feat[1]] < feat[2]
-    if kind == "diag":
-        return feat[3] * obs[:, feat[1]] + obs[:, feat[2]] < 0
-    if kind == "sq_diag":
-        return feat[3] * obs[:, feat[1]] ** 2 + obs[:, feat[2]] < 0
-    if kind == "prod":
-        return obs[:, feat[1]] * obs[:, feat[2]] < feat[3]
-    if kind == "tridiag":
-        return (
-            feat[4] * obs[:, feat[1]]
-            + feat[5] * obs[:, feat[2]]
-            + obs[:, feat[3]]
-            < 0
-        )
-    # Canonical sin/cos-axis semantics, vectorised over the world axis:
-    # sin(obs[dim]) < t, cos(obs[dim]) < t. Matches oracle_port.eval_feature
-    # and Synthex core's :sin_axis / :cos_axis generators.
-    if kind == "sin_axis":
-        return np.sin(obs[:, feat[1]]) < feat[2]
-    if kind == "cos_axis":
-        return np.cos(obs[:, feat[1]]) < feat[2]
-    return np.zeros(obs.shape[0], dtype=bool)
+    # Batch of N worlds: column accessor returns the (N,) slice obs[:, i].
+    # Feature semantics live in the shared registry (feature_kernels) so
+    # this vectorised path can never drift from the CPU oracle. The
+    # kernel bodies are pure-numpy and allocation-light, matching this
+    # hot path's requirements. See feature_kernels.py.
+    kern = FEATURE_KERNELS.get(feat[0])
+    if kern is None:
+        return np.zeros(obs.shape[0], dtype=bool)
+    return kern(feat, lambda i: obs[:, i])
 
 
 def eval_pred_batch(pred, obs):

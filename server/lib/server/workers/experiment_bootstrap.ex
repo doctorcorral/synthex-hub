@@ -75,7 +75,7 @@ defmodule Server.Workers.ExperimentBootstrap do
     Logger.info("[Bootstrap] starting #{exp.env_name} (#{exp.id})")
 
     env_key = decode_env_key(exp.env_key)
-    ctx = build_context(env_key, exp.config, exp.id, exp.env_name)
+    ctx = build_context(env_key, exp.config, exp.id)
     n_episodes = ctx.n_episodes
 
     # Locate or create the env_policy lineage for this (env, sig).
@@ -202,9 +202,8 @@ defmodule Server.Workers.ExperimentBootstrap do
     total_reward / length(val_seeds)
   end
 
-  defp has_committed_predicates?(%{predicates: %{"preds" => list}})
-       when is_list(list) and list != [],
-       do: true
+  defp has_committed_predicates?(%{predicates: %{"preds" => list}}) when is_list(list) and list != [],
+    do: true
 
   defp has_committed_predicates?(_), do: false
 
@@ -235,9 +234,9 @@ defmodule Server.Workers.ExperimentBootstrap do
   `experiment_id` is included in the batch-name prefix so workers
   and operators can correlate Batch rows back to their experiment.
   """
-  def build_context(env_key, config, experiment_id, env_name \\ nil) when is_atom(env_key) do
+  def build_context(env_key, config, experiment_id) when is_atom(env_key) do
     opts = config_to_opts(config)
-    scorer = build_local_scorer(env_key, experiment_id, config, env_name)
+    scorer = build_local_scorer(env_key, experiment_id, config)
     Synthex.Gym.Mujoco.init_context(env_key, Keyword.put(opts, :scorer, scorer))
   end
 
@@ -248,7 +247,7 @@ defmodule Server.Workers.ExperimentBootstrap do
   # 50–70% of the master's per-batch transient heap and is the
   # difference between fitting in our 4 GB Fly machines and OOMing
   # on Ant's tridiag pool (≈ 300 K candidates per `score_bit`).
-  defp build_local_scorer(env_key, experiment_id, config, env_name) do
+  defp build_local_scorer(env_key, experiment_id, config) do
     adapter = get_adapter(config)
     {default_chunk, default_collect} = default_chunk_sizes(adapter)
     chunk_size = get_int(config, "chunk_size", default_chunk)
@@ -258,7 +257,6 @@ defmodule Server.Workers.ExperimentBootstrap do
 
     Server.LocalScorer.new(
       env_key: env_key,
-      env_name: env_name,
       adapter: adapter,
       chunk_size: chunk_size,
       collect_states_chunk_size: collect_chunk_size,
@@ -332,7 +330,9 @@ defmodule Server.Workers.ExperimentBootstrap do
     "prod" => :prod,
     "tridiag" => :tridiag,
     "sin_axis" => :sin_axis,
-    "cos_axis" => :cos_axis
+    "cos_axis" => :cos_axis,
+    "wavelet_box" => :wavelet_box,
+    "wavelet_ricker" => :wavelet_ricker
   }
 
   defp feature_types(list) when is_list(list) do
