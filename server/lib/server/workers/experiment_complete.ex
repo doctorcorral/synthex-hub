@@ -44,7 +44,11 @@ defmodule Server.Workers.ExperimentComplete do
 
   defp finalize(%Experiment{} = exp) do
     env_key = ExperimentBootstrap.decode_env_key(exp.env_key)
-    ctx = ExperimentBootstrap.build_context(env_key, exp.config, exp.id, exp.env_name)
+    # build_context/3 already derives the correct ctx.env_name (the
+    # warp variant included) from env_key + config — same as the
+    # controller's run_step. Passing exp.env_name here called a
+    # nonexistent build_context/4 and crashed finalize/1.
+    ctx = ExperimentBootstrap.build_context(env_key, exp.config, exp.id)
 
     {:ok, env_policy} = EnvPolicies.for_experiment(exp)
     preds = decode_predicates(env_policy.predicates)
