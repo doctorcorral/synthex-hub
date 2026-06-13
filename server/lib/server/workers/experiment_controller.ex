@@ -93,7 +93,8 @@ defmodule Server.Workers.ExperimentController do
   require Logger
   import Ecto.Query
 
-  alias Server.{CommitGate, EnvPolicies, EnvPolicy, Experiment, Experiments, Queue, Repo}
+  alias Server.{CommitGate, EnvPolicies, EnvPolicy, Experiment, Experiments,
+                Queue, Repo}
   alias Server.Workers.{ExperimentBootstrap, ExperimentComplete}
   alias Synthex.Core.PrettyPrint
   alias Synthex.Gym.Mujoco
@@ -185,7 +186,7 @@ defmodule Server.Workers.ExperimentController do
 
   defp run_step(%Experiment{} = exp, _args) do
     env_key = ExperimentBootstrap.decode_env_key(exp.env_key)
-    ctx = ExperimentBootstrap.build_context(env_key, exp.config, exp.id, exp.env_name)
+    ctx = ExperimentBootstrap.build_context(env_key, exp.config, exp.id)
     cegar_iter = exp.current_cegar_iter
     epsilon = acceptance_epsilon(exp.config)
     bit_concurrency = bit_concurrency(exp.config)
@@ -278,17 +279,7 @@ defmodule Server.Workers.ExperimentController do
 
   # ── One pass over the open bits ─────────────────────────────
 
-  defp dispatch_wave(
-         exp_id,
-         ctx,
-         features,
-         seeds,
-         cegar_iter,
-         epsilon,
-         concurrency,
-         wave_num,
-         acc
-       ) do
+  defp dispatch_wave(exp_id, ctx, features, seeds, cegar_iter, epsilon, concurrency, wave_num, acc) do
     {:ok, exp_before} = Experiments.get(exp_id)
 
     cond do
@@ -406,7 +397,9 @@ defmodule Server.Workers.ExperimentController do
         {{nc, ns, ni, nf + 1}, a}
 
       {:ok, %Experiment{status: status}} when status != "running" ->
-        Logger.info("[Controller] bit #{bit_idx}: experiment status=#{status}, halting pass")
+        Logger.info(
+          "[Controller] bit #{bit_idx}: experiment status=#{status}, halting pass"
+        )
 
         {{nc, ns, ni, nf + 1}, a}
 
@@ -415,11 +408,22 @@ defmodule Server.Workers.ExperimentController do
         v_current = env_policy_now.policy_version
         preds_now = decode_predicates(env_policy_now.predicates)
 
-        case evaluate_bit(preds_now, bit_idx, features, ctx, seeds) do
+        case evaluate_bit(preds_now, bit_idx, features, ctx, seeds, exp_id) do
           :no_improvement ->
-            {{nc, ns, ni + 1, nf}, %{a | settled_at: Map.put(a.settled_at, bit_idx, v_current)}}
+            debug_bit_verdict(
+              exp_id, exp_now.env_name, bit_idx, "no_improvement",
+              nil, v_current, env_policy_now.best_reward
+            )
+
+            {{nc, ns, ni + 1, nf},
+             %{a | settled_at: Map.put(a.settled_at, bit_idx, v_current)}}
 
           {:improved, candidate, reward} ->
+            debug_bit_verdict(
+              exp_id, exp_now.env_name, bit_idx, "improved",
+              reward, v_current, env_policy_now.best_reward
+            )
+
             apply_commit(
               {bit_idx, candidate, reward},
               {nc, ns, ni, nf},
@@ -464,7 +468,7 @@ defmodule Server.Workers.ExperimentController do
       bits
       |> Task.async_stream(
         fn bit_idx ->
-          {bit_idx, evaluate_bit(preds, bit_idx, features, ctx, seeds)}
+          {bit_idx, evaluate_bit(preds, bit_idx, features, ctx, seeds, exp_id)}
         end,
         max_concurrency: concurrency,
         timeout: :infinity,
@@ -482,18 +486,42 @@ defmodule Server.Workers.ExperimentController do
     handle_outcomes(outcomes, exp_id, v_start, cegar_iter, ctx, epsilon, wave_num, acc)
   end
 
-  defp evaluate_bit(preds, bit_idx, features, ctx, seeds) do
+  defp evaluate_bit(preds, bit_idx, features, ctx, seeds, exp_id) do
     try do
       Mujoco.optimize_bit(preds, bit_idx, features, ctx, seeds)
     rescue
       err ->
-        Logger.warning(
-          "[Controller] bit #{bit_idx} crashed: #{Exception.message(err)}\n" <>
-            Exception.format_stacktrace(__STACKTRACE__)
-        )
+        msg = Exception.message(err)
+        trace = Exception.format_stacktrace(__STACKTRACE__)
+
+        Logger.warning("[Controller] bit #{bit_idx} crashed: #{msg}\n#{trace}")
+
+        # Durable capture: the blanket rescue here silently converts a
+        # crash anywhere in `optimize_bit` (including the depth-1 phase,
+        # AFTER a valid depth-0 improvement was found) into
+        # `:no_improvement`, which is indistinguishable from a genuine
+        # null result once the Logger buffer rolls off. Persist it.
+        debug_bit_crash(exp_id, bit_idx, msg, trace)
 
         :no_improvement
     end
+  end
+
+  defp debug_bit_crash(exp_id, bit_idx, msg, trace) do
+    Experiments.log_event!(
+      "error",
+      "cegar-debug",
+      "bit #{bit_idx} optimize_bit CRASHED: #{msg}",
+      experiment_id: exp_id,
+      metadata: %{
+        "phase" => "crash",
+        "bit" => bit_idx,
+        "error" => msg,
+        "stacktrace" => String.slice(trace, 0, 4000)
+      }
+    )
+  rescue
+    e -> Logger.warning("[Controller] debug_bit_crash failed: #{inspect(e)}")
   end
 
   defp handle_outcomes(outcomes, exp_id, v_start, cegar_iter, ctx, epsilon, wave_num, acc) do
@@ -555,6 +583,8 @@ defmodule Server.Workers.ExperimentController do
         }
       )
 
+    debug_gate_outcome(exp_id, bit_idx, reward, v_start, attempt)
+
     case attempt do
       {:committed, new_version, _env_policy, _exp} ->
         :ok =
@@ -572,10 +602,64 @@ defmodule Server.Workers.ExperimentController do
         {{nc, ns, ni, nf + 1}, a}
 
       {:error, reason} ->
-        Logger.warning("[Controller] commit gate error for bit #{bit_idx}: #{inspect(reason)}")
+        Logger.warning(
+          "[Controller] commit gate error for bit #{bit_idx}: #{inspect(reason)}"
+        )
 
         {{nc, ns, ni, nf}, a}
     end
+  end
+
+  # ── Temporary CEGAR-acceptance instrumentation ──────────────────
+  # Durable per-bit trace into `system_events` so a completed run can
+  # be diagnosed after its Logger buffer has rolled off. Records what
+  # `optimize_bit` decided (verdict + reward) against the lineage best
+  # the commit gate compares to, and the gate's actual outcome.
+  # Wrapped so instrumentation can never crash a controller step.
+  defp debug_bit_verdict(exp_id, env_name, bit_idx, verdict, reward, v, lineage_best) do
+    Experiments.log_event!(
+      "info",
+      "cegar-debug",
+      "bit #{bit_idx} verdict=#{verdict} reward=#{inspect(reward)} " <>
+        "v=#{v} lineage_best=#{inspect(lineage_best)}",
+      env_name: env_name,
+      experiment_id: exp_id,
+      metadata: %{
+        "phase" => "verdict",
+        "bit" => bit_idx,
+        "verdict" => verdict,
+        "reward" => reward,
+        "v" => v,
+        "lineage_best" => lineage_best
+      }
+    )
+  rescue
+    e -> Logger.warning("[Controller] debug_bit_verdict failed: #{inspect(e)}")
+  end
+
+  defp debug_gate_outcome(exp_id, bit_idx, reward, v_start, attempt) do
+    outcome =
+      case attempt do
+        {:committed, v, _, _} -> "committed->v#{v}"
+        {:rejected, reason} -> "rejected:#{reason}"
+        {:error, reason} -> "error:#{inspect(reason)}"
+      end
+
+    Experiments.log_event!(
+      "info",
+      "cegar-debug",
+      "bit #{bit_idx} gate=#{outcome} reward=#{inspect(reward)} eval_at_v=#{v_start}",
+      experiment_id: exp_id,
+      metadata: %{
+        "phase" => "gate",
+        "bit" => bit_idx,
+        "gate" => outcome,
+        "reward" => reward,
+        "eval_at_version" => v_start
+      }
+    )
+  rescue
+    e -> Logger.warning("[Controller] debug_gate_outcome failed: #{inspect(e)}")
   end
 
   defp open_bits(n_bits, v_current, %{committed: committed, settled_at: settled_at}) do

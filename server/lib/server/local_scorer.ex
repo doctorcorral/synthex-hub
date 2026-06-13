@@ -80,7 +80,6 @@ defmodule Server.LocalScorer do
 
     state = %{
       env_key: env_key,
-      env_name: Keyword.get(opts, :env_name),
       # Physics adapter tag stamped onto every batch this scorer
       # submits; the hub routes chunks to workers advertising a
       # matching capability. Defaults to "mujoco" (the CPU swarm).
@@ -132,7 +131,6 @@ defmodule Server.LocalScorer do
     payload =
       request
       |> Map.put("name", batch_name)
-      |> put_env_name(state.env_name)
       |> Map.put("chunk_size", state.chunk_size)
       |> Map.put("candidates", augmented)
       |> Map.put("adapter", state.adapter)
@@ -147,7 +145,9 @@ defmodule Server.LocalScorer do
 
         case await_batch_items(batch.id, state) do
           {:ok, items} ->
-            unpack_score_bit_items(items, batch.id)
+            result = unpack_score_bit_items(items, batch.id)
+            debug_score_bit(result, request, state, batch)
+            result
 
           {:error, _} = err ->
             err
@@ -170,7 +170,6 @@ defmodule Server.LocalScorer do
         request
         |> Map.put("name", batch_name)
         |> Map.put("cmd", "collect_states")
-        |> put_env_name(state.env_name)
         |> Map.put("chunk_size", state.collect_chunk_size)
         |> Map.put("candidates", seeds)
         |> Map.delete("seeds")
@@ -211,12 +210,6 @@ defmodule Server.LocalScorer do
 
   # ── Helpers ────────────────────────────────────────────────
 
-  defp put_env_name(payload, env_name) when is_binary(env_name) and env_name != "" do
-    Map.put(payload, "env_name", env_name)
-  end
-
-  defp put_env_name(payload, _), do: payload
-
   defp unpack_score_bit_items([], batch_id) do
     {:error, "score_bit batch #{batch_id} completed with zero items"}
   end
@@ -236,6 +229,37 @@ defmodule Server.LocalScorer do
        "baseline_landings" => Map.get(baseline, "landings", 0)
      }}
   end
+
+  # ── Temporary CEGAR-acceptance instrumentation ──────────────────
+  # Records the exact `baseline_reward` + best-candidate reward the
+  # master's `optimize_bit` receives for this `score_bit` call. Paired
+  # with the controller's `cegar-debug` verdict events, this isolates
+  # whether a null result comes from an inflated baseline, the
+  # candidate scoring, or the commit gate. Never crashes the scorer.
+  defp debug_score_bit({:ok, %{"scores" => scores, "baseline_reward" => base}}, request, state, batch) do
+    rewards = Enum.map(scores, fn s -> Map.get(s, "reward", 0.0) end)
+    best = Enum.max(rewards, fn -> nil end)
+
+    Server.Experiments.log_event!(
+      "info",
+      "cegar-debug",
+      "score_bit bit=#{request["target_bit"]} batch=#{batch.name} " <>
+        "baseline=#{inspect(base)} best_cand=#{inspect(best)} n_cands=#{length(scores)}",
+      env_name: request["env_name"],
+      experiment_id: state.experiment_id,
+      metadata: %{
+        "phase" => "score_bit",
+        "target_bit" => request["target_bit"],
+        "baseline_reward" => base,
+        "best_candidate_reward" => best,
+        "n_candidates" => length(scores)
+      }
+    )
+  rescue
+    e -> Logger.warning("[LocalScorer] debug_score_bit failed: #{inspect(e)}")
+  end
+
+  defp debug_score_bit(_other, _request, _state, _batch), do: :ok
 
   defp maybe_put_experiment_id(payload, nil), do: payload
 

@@ -104,6 +104,15 @@ def _wavelet_ricker(feat, col):
     # Ricker / Mexican-hat bump psi((obs[i]-b)/a) < t, where
     # psi(z) = (1 - z**2) * exp(-z**2 / 2). Localized around b with
     # width set by scale a. feat = ["wavelet_ricker", i, b, a, t].
-    z = (col(feat[1]) - feat[2]) / feat[3]
+    #
+    # Guard a == 0: a degenerate scale would divide by zero and
+    # produce a NaN return, which serializes back to the master as a
+    # `null` reward and corrupts candidate selection. A zero-width
+    # bump responds nowhere, so the predicate is uniformly False.
+    a = feat[3]
+    x = col(feat[1])
+    if a == 0:
+        return x != x  # all-False mask (scalar or ndarray), no NaNs
+    z = (x - feat[2]) / a
     zz = z * z
     return (1.0 - zz) * np.exp(-zz / 2.0) < feat[4]
