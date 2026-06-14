@@ -62,6 +62,10 @@ defmodule Worker.Pipeline do
   # ── Broadway callbacks ──────────────────────────────────────
 
   @impl Broadway
+  def handle_message(_processor, %Broadway.Message{data: %{batched: true}} = message, _context) do
+    handle_batched(message)
+  end
+
   def handle_message(_processor, %Broadway.Message{} = message, _context) do
     %{candidate: candidate, idx: idx} = message.data
 
@@ -74,7 +78,7 @@ defmodule Worker.Pipeline do
     result =
       try do
         Worker.PortPool.with_port(timeout, fn port ->
-          payload = build_payload(base_params, candidate)
+          payload = build_payload(base_params, [candidate])
 
           case Worker.PythonPort.score(port, payload, timeout) do
             {:ok, [first | _]} ->
@@ -105,6 +109,63 @@ defmodule Worker.Pipeline do
     Broadway.Message.put_data(message, result)
   end
 
+  # Score an entire chunk in one oracle call (batched adapters). The
+  # oracle returns one result per candidate, in candidate order; we fan
+  # exactly `total` results back into the aggregator (padding with errors
+  # if the oracle returned fewer) so the chunk always completes.
+  defp handle_batched(message) do
+    candidates = message.data.candidates
+    chunk_id = message.metadata.chunk_id
+    total = message.metadata.total
+    base_params = message.metadata.base_params
+    timeout = score_timeout()
+
+    started = System.monotonic_time()
+
+    outcome =
+      try do
+        Worker.PortPool.with_port(timeout, fn port ->
+          payload = build_payload(base_params, candidates)
+
+          case Worker.PythonPort.score(port, payload, timeout) do
+            {:ok, list} when is_list(list) -> {:ok, list}
+            {:ok, other} -> {:error, "unexpected oracle shape: #{inspect(other)}"}
+            {:error, reason} -> {:error, inspect(reason)}
+          end
+        end)
+      rescue
+        e -> {:error, "#{inspect(e.__struct__)}: #{Exception.message(e)}"}
+      catch
+        :exit, reason -> {:error, "exit: #{inspect(reason)}"}
+      end
+
+    duration = System.monotonic_time() - started
+
+    results =
+      case outcome do
+        {:ok, list} ->
+          for idx <- 0..(total - 1) do
+            case Enum.at(list, idx) do
+              %{} = r -> Map.put(r, "idx", idx)
+              _ -> %{"idx" => idx, "error" => "missing result from oracle"}
+            end
+          end
+
+        {:error, reason} ->
+          for idx <- 0..(total - 1), do: %{"idx" => idx, "error" => reason}
+      end
+
+    Enum.each(results, fn r -> Worker.ChunkAggregator.add_result(chunk_id, r) end)
+
+    :telemetry.execute(
+      [:synthex_hub, :worker, :chunk, :batched_scored],
+      %{duration: duration, candidates: total},
+      %{chunk_id: chunk_id, success: match?({:ok, _}, outcome)}
+    )
+
+    Broadway.Message.put_data(message, %{"batched" => true, "n" => total})
+  end
+
   @impl Broadway
   def handle_failed(messages, _context) do
     # Broadway only calls this when handle_message itself raises beyond
@@ -112,28 +173,49 @@ defmodule Worker.Pipeline do
     # a result for every message of the chunk, otherwise the chunk
     # would never complete.
     Enum.each(messages, fn message ->
-      idx = message.data[:idx] || -1
       chunk_id = message.metadata[:chunk_id]
       reason = inspect(message.status)
 
-      if chunk_id do
-        Worker.ChunkAggregator.add_result(chunk_id, %{
-          "idx" => idx,
-          "error" => "broadway_failed: #{reason}"
-        })
+      cond do
+        is_nil(chunk_id) ->
+          :ok
+
+        # A batched message owns its whole chunk: fan one error per
+        # expected result so the chunk still reaches `total` and submits.
+        match?(%{batched: true}, message.data) ->
+          total = message.metadata[:total] || 0
+
+          for idx <- 0..(total - 1)//1 do
+            Worker.ChunkAggregator.add_result(chunk_id, %{
+              "idx" => idx,
+              "error" => "broadway_failed: #{reason}"
+            })
+          end
+
+        true ->
+          idx = message.data[:idx] || -1
+
+          Worker.ChunkAggregator.add_result(chunk_id, %{
+            "idx" => idx,
+            "error" => "broadway_failed: #{reason}"
+          })
       end
     end)
 
     messages
   end
 
-  defp build_payload(base_params, candidate) do
+  defp build_payload(base_params, candidates) when is_list(candidates) do
     base_params
     |> Map.put_new("cmd", "score_bit")
-    |> Map.put("candidates", [candidate])
+    |> Map.put("candidates", candidates)
   end
 
+  # Borrowers must be willing to wait at least as long as a port may be
+  # busy on a single job, plus the grace the port itself uses to kill +
+  # recycle a wedged interpreter. Otherwise a checkout could give up
+  # while the one port (pool_size=1, GPU) is mid-recycle.
   defp score_timeout do
-    Application.get_env(:worker, :request_timeout_ms, 30_000) * 5
+    Application.get_env(:worker, :job_timeout_ms, 5 * 60 * 1000) + 60_000
   end
 end

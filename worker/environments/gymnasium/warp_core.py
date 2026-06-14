@@ -279,13 +279,113 @@ def is_warp_env(env_name):
     return env_name in ENV_SPECS
 
 
+# ── Declarative env specs pushed from the hub ───────────────────────
+#
+# A hub may ship a self-describing `env_spec` in the job payload so a new
+# Warp env runs on existing workers with NO rebuild. We reconstruct the
+# function-valued spec from named, data-only building blocks. This covers
+# the MuJoCo locomotion family (forward + healthy − ctrl reward, z/tip
+# health). A genuinely novel rule still needs a new named type here, but
+# that is rare; the common case is pure data.
+
+_OBS_BUILDERS = {
+    "exclude_x": _obs_exclude_x,
+    "exclude_xy": _obs_exclude_xy,
+    "full": _obs_full,
+    "idp": _idp_obs,
+}
+
+
+def _make_reward(desc):
+    t = desc.get("type", "locomotion")
+    if t == "idp":
+        return _idp_reward
+    if t == "locomotion":
+        dt = float(desc.get("dt", 0.05))
+        fw = float(desc.get("forward_weight", 1.0))
+        cw = float(desc.get("ctrl_weight", 0.5))
+        hr = float(desc.get("healthy_reward", 0.0))
+        xi = int(desc.get("x_index", 0))
+        z_idx = desc.get("z_idx")
+        z_lo = desc.get("z_lo")
+        z_hi = desc.get("z_hi")
+
+        def reward(prev, cur, ctrl):
+            forward = fw * (cur["qpos"][:, xi] - prev["qpos"][:, xi]) / dt
+            ctrl_cost = cw * np.sum(np.square(ctrl), axis=1)
+            out = forward - ctrl_cost
+            if hr and z_idx is not None:
+                z = cur["qpos"][:, int(z_idx)]
+                healthy = (z >= float(z_lo)) & (z <= float(z_hi))
+                out = out + np.where(healthy, hr, 0.0)
+            return out
+
+        return reward
+    raise ValueError(f"unknown reward type: {t}")
+
+
+def _make_terminated(desc):
+    t = desc.get("type", "never")
+    if t == "never":
+        return _never_terminates
+    if t == "z_healthy":
+        return _z_healthy(int(desc["z_idx"]), float(desc["z_lo"]), float(desc["z_hi"]))
+    if t == "z_angle":
+        return _z_angle_healthy(
+            int(desc["z_idx"]), float(desc["z_lo"]), float(desc["z_hi"]),
+            int(desc["ang_idx"]), float(desc["ang_lo"]), float(desc["ang_hi"]),
+        )
+    if t == "idp_tip":
+        return _idp_terminated
+    raise ValueError(f"unknown terminated type: {t}")
+
+
+def build_spec_from_descriptor(desc):
+    """Reconstruct a function-valued ENV_SPECS entry from a data-only
+    descriptor pushed by the hub."""
+    obs_type = (desc.get("obs") or {}).get("type", "exclude_x")
+    if obs_type not in _OBS_BUILDERS:
+        raise ValueError(f"unknown obs type: {obs_type}")
+
+    return {
+        "base_env": desc["base_env"],
+        "frame_skip": int(desc.get("frame_skip", 5)),
+        "n_action_dims": int(desc["n_action_dims"]),
+        "action_low": float(desc.get("action_low", -1.0)),
+        "action_high": float(desc.get("action_high", 1.0)),
+        "needs": list(desc.get("needs", [])),
+        "obs_fn": _OBS_BUILDERS[obs_type],
+        "reward_fn": _make_reward(desc.get("reward") or {}),
+        "terminated_fn": _make_terminated(desc.get("terminated") or {}),
+        "success_threshold": float(desc.get("success_threshold", float("inf"))),
+        "reset_noise_scale": float(desc.get("reset_noise_scale", 0.1)),
+    }
+
+
+def has_warp_descriptor(env_spec):
+    return isinstance(env_spec, dict) and bool(env_spec.get("base_env"))
+
+
+def resolve_spec(env_name, env_spec):
+    """Per-job Warp spec. Prefers a hub-pushed descriptor (no rebuild to
+    add envs); falls back to the baked ENV_SPECS table."""
+    if has_warp_descriptor(env_spec):
+        return build_spec_from_descriptor(env_spec)
+    if env_name in ENV_SPECS:
+        return ENV_SPECS[env_name]
+    raise ValueError(
+        f"unknown warp env_name: {env_name} and no env_spec descriptor; "
+        f"baked={list(ENV_SPECS)}"
+    )
+
+
 # ── Model loading + seeded reset ────────────────────────────────────
 
 
-def load_mj_model(env_name):
+def load_mj_model(env_name, spec=None):
     """Compiled `mujoco.MjModel` + init pose for a Warp env, sourced
     from its base Gymnasium env so the physics match the CPU lineage."""
-    spec = ENV_SPECS[env_name]
+    spec = spec if spec is not None else ENV_SPECS[env_name]
     if gym is None:
         raise RuntimeError("gymnasium is required to load the base model")
     base = gym.make(spec["base_env"]).unwrapped
@@ -298,14 +398,14 @@ def load_mj_model(env_name):
     return model, init_qpos, init_qvel
 
 
-def reset_states(env_name, seeds, init_qpos, init_qvel):
+def reset_states(env_name, seeds, init_qpos, init_qvel, spec=None):
     """Per-seed initial (qpos, qvel) batches of shape (N, nq)/(N, nv).
 
     Reproduces Gymnasium's MuJoCo reset noise EXACTLY (validated
     bit-for-bit): SeedSequence->PCG64 per seed, uniform(-s, s) on
     qpos and s*N(0,1) on qvel, in that draw order.
     """
-    spec = ENV_SPECS[env_name]
+    spec = spec if spec is not None else ENV_SPECS[env_name]
     ns = spec["reset_noise_scale"]
     nq = init_qpos.shape[0]
     nv = init_qvel.shape[0]

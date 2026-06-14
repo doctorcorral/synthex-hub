@@ -68,4 +68,9 @@ config :worker,
   oracle_script: oracle_script,
   poll_interval_ms: String.to_integer(System.get_env("POLL_INTERVAL_MS", "2000")),
   heartbeat_interval_ms: String.to_integer(System.get_env("HEARTBEAT_INTERVAL_MS", "30000")),
-  request_timeout_ms: String.to_integer(System.get_env("REQUEST_TIMEOUT_MS", "30000"))
+  request_timeout_ms: String.to_integer(System.get_env("REQUEST_TIMEOUT_MS", "30000")),
+  # Per-job watchdog: if the oracle doesn't answer within this window the
+  # worker SIGKILLs the (presumed wedged) Python process and recycles a
+  # fresh interpreter, so a slow/hung chunk self-heals without a manual
+  # container restart. Generous by default; lower it on fast CPU swarms.
+  job_timeout_ms: String.to_integer(System.get_env("JOB_TIMEOUT_MS", "300000"))

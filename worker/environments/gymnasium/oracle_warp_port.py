@@ -70,17 +70,17 @@ _MODELS = {}
 _BACKENDS = {}
 
 
-def get_model(env_name):
+def get_model(env_name, spec=None):
     if env_name not in _MODELS:
-        _MODELS[env_name] = core.load_mj_model(env_name)
+        _MODELS[env_name] = core.load_mj_model(env_name, spec)
     return _MODELS[env_name]
 
 
-def get_backend(env_name, nworld):
+def get_backend(env_name, nworld, spec=None):
     key = (env_name, nworld)
     b = _BACKENDS.get(key)
     if b is None:
-        model, _, _ = get_model(env_name)
+        model, _, _ = get_model(env_name, spec)
         b = make_backend(model, nworld, prefer=BACKEND_PREF, use_graph=USE_GRAPH)
         _BACKENDS[key] = b
         log.info("built %s backend for %s nworld=%d", b.name, env_name, nworld)
@@ -98,7 +98,7 @@ def _read_state(b, needs):
     return {"qpos": qpos, "qvel": qvel, "extras": extras}
 
 
-def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
+def rollout(env_name, spec, seeds, bit_preds_per_world, max_steps, bits_per_dim,
             record_stride=None):
     """Advance `len(seeds)` worlds under per-world bit-policies.
 
@@ -107,15 +107,14 @@ def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
       success   (N,) bool    ep_return > success_threshold
       states    list[N]      subsampled obs (only if record_stride set)
     """
-    spec = core.ENV_SPECS[env_name]
-    _, iqp, iqv = get_model(env_name)
+    _, iqp, iqv = get_model(env_name, spec)
     n = len(seeds)
     fs = spec["frame_skip"]
     needs = spec.get("needs", [])
     n_bits = spec["n_action_dims"] * bits_per_dim
 
-    qpos, qvel = core.reset_states(env_name, seeds, iqp, iqv)
-    b = get_backend(env_name, n)
+    qpos, qvel = core.reset_states(env_name, seeds, iqp, iqv, spec)
+    b = get_backend(env_name, n, spec)
     b.set_state(qpos, qvel)
 
     state = _read_state(b, needs)
@@ -159,8 +158,7 @@ def rollout(env_name, seeds, bit_preds_per_world, max_steps, bits_per_dim,
 
 def handle_score_bit(job):
     env_name = job["env_name"]
-    if not core.is_warp_env(env_name):
-        raise ValueError(f"unknown warp env_name: {env_name}; known={list(core.ENV_SPECS)}")
+    spec = core.resolve_spec(env_name, job.get("env_spec"))
 
     candidates = job["candidates"]
     bit_preds = job["bit_predicates"]
@@ -183,7 +181,7 @@ def handle_score_bit(job):
     target_per_world = [candidates[wi // s] for wi in range(c * s)]
     bit_preds_per_world[target_bit] = core.per_world(target_per_world)
 
-    out = rollout(env_name, world_seeds, bit_preds_per_world, max_steps, bits_per_dim)
+    out = rollout(env_name, spec, world_seeds, bit_preds_per_world, max_steps, bits_per_dim)
     ep = out["ep_return"]
     succ = out["success"]
 
@@ -203,8 +201,7 @@ def handle_score_bit(job):
 
 def handle_collect_states(job):
     env_name = job["env_name"]
-    if not core.is_warp_env(env_name):
-        raise ValueError(f"unknown warp env_name: {env_name}; known={list(core.ENV_SPECS)}")
+    spec = core.resolve_spec(env_name, job.get("env_spec"))
 
     seeds = job.get("candidates") or job.get("seeds") or [0]
     bit_preds = job.get("bit_predicates", [])
@@ -212,7 +209,6 @@ def handle_collect_states(job):
     bits_per_dim = int(job.get("bits_per_dim", 3))
     stride = max(1, int(job.get("state_stride", 10)))
 
-    spec = core.ENV_SPECS[env_name]
     n_bits = spec["n_action_dims"] * bits_per_dim
     # collect_states uses the CURRENT policy for every world; predicates
     # are shared (or default truep when bit_preds is short / empty).
@@ -220,7 +216,7 @@ def handle_collect_states(job):
         bit_preds[b] if b < len(bit_preds) else "truep" for b in range(n_bits)
     ]
 
-    out = rollout(env_name, list(seeds), bit_preds_per_world, max_steps,
+    out = rollout(env_name, spec, list(seeds), bit_preds_per_world, max_steps,
                   bits_per_dim, record_stride=stride)
     ep = out["ep_return"]
     succ = out["success"]
@@ -246,8 +242,11 @@ COMMANDS = {
 
 def handle(job):
     env_name = job.get("env_name", "")
-    # Non-warp env => fall back to the original per-rollout CPU oracle.
-    if not core.is_warp_env(env_name):
+    # Route to the Warp path when the env is baked OR the hub pushed a
+    # Warp descriptor (base_env present) — the latter lets brand-new Warp
+    # envs run with no rebuild. Everything else falls back to the
+    # per-rollout CPU oracle (which itself honours a pushed env_spec).
+    if not (core.is_warp_env(env_name) or core.has_warp_descriptor(job.get("env_spec"))):
         return cpu_oracle.handle(job)
 
     cmd = job.get("cmd", "score_bit")

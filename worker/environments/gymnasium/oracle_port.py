@@ -84,6 +84,40 @@ ENV_CONFIGS = {
 }
 
 
+def resolve_cfg(job):
+    """Per-job environment config.
+
+    Prefers a hub-pushed ``env_spec`` so brand-new environments need NO
+    worker rebuild — the hub is the single source of truth and ships the
+    handful of scalars (action dims/range/steps/threshold) the oracle
+    needs; ``gym.make(env_name)`` supplies the physics for any registered
+    Gymnasium id. Falls back to the baked ``ENV_CONFIGS`` table when the
+    payload carries no spec (older hubs), so nothing regresses.
+    """
+    env_name = job["env_name"]
+    spec = job.get("env_spec")
+
+    if isinstance(spec, dict) and spec.get("n_action_dims") is not None:
+        return {
+            "n_action_dims": int(spec["n_action_dims"]),
+            "action_low": float(spec.get("action_low", -1.0)),
+            "action_high": float(spec.get("action_high", 1.0)),
+            "max_steps": int(spec.get("max_steps", 1000)),
+            # No threshold => never count an episode as a "success"; this
+            # only affects the secondary landings metric, not the reward.
+            "success_threshold": float(spec.get("success_threshold", float("inf"))),
+            "env_kwargs": spec.get("env_kwargs") or {},
+        }
+
+    if env_name in ENV_CONFIGS:
+        return ENV_CONFIGS[env_name]
+
+    raise ValueError(
+        f"unknown env_name: {env_name} and no env_spec in payload; "
+        f"baked={list(ENV_CONFIGS)}"
+    )
+
+
 # ── Predicate evaluation ────────────────────────────────────────────
 
 
@@ -130,8 +164,7 @@ def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
     return actions
 
 
-def score_bit_candidate(env_name, candidate, bit_preds, target_bit, seeds, max_steps, bits_per_dim):
-    cfg = ENV_CONFIGS[env_name]
+def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, max_steps, bits_per_dim):
     test_preds = list(bit_preds)
     test_preds[target_bit] = candidate
     total = 0.0
@@ -163,8 +196,7 @@ def score_bit_candidate(env_name, candidate, bit_preds, target_bit, seeds, max_s
 
 def handle_score_bit(job):
     env_name = job["env_name"]
-    if env_name not in ENV_CONFIGS:
-        raise ValueError(f"unknown env_name: {env_name}; known={list(ENV_CONFIGS)}")
+    cfg = resolve_cfg(job)
 
     candidates = job["candidates"]
     bit_preds = job["bit_predicates"]
@@ -177,7 +209,7 @@ def handle_score_bit(job):
     for i, cand in enumerate(candidates):
         try:
             r = score_bit_candidate(
-                env_name, cand, bit_preds, target_bit, seeds, max_steps, bits_per_dim
+                env_name, cfg, cand, bit_preds, target_bit, seeds, max_steps, bits_per_dim
             )
             r["idx"] = i
         except Exception as e:
@@ -196,14 +228,13 @@ def handle_score_bit(job):
 # pool.
 
 
-def collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim, stride):
+def collect_states_one(env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride):
     """
     Roll out one episode; record at most `max_steps // stride` evenly
     spaced states. The master only needs a representative sample for
     feature generation — sending every timestep would push 1-2 MB per
     seed through the hub for nothing.
     """
-    cfg = ENV_CONFIGS[env_name]
     env_kwargs = cfg.get("env_kwargs", {})
     env = gym.make(env_name, **env_kwargs)
     try:
@@ -231,8 +262,7 @@ def collect_states_one(env_name, seed, bit_preds, max_steps, bits_per_dim, strid
 
 def handle_collect_states(job):
     env_name = job["env_name"]
-    if env_name not in ENV_CONFIGS:
-        raise ValueError(f"unknown env_name: {env_name}; known={list(ENV_CONFIGS)}")
+    cfg = resolve_cfg(job)
 
     seeds = job.get("candidates") or job.get("seeds") or [0]
     bit_preds = job.get("bit_predicates", [])
@@ -249,7 +279,7 @@ def handle_collect_states(job):
     for i, seed in enumerate(seeds):
         try:
             r = collect_states_one(
-                env_name, seed, bit_preds, max_steps, bits_per_dim, stride
+                env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride
             )
             r["idx"] = i
         except Exception as e:

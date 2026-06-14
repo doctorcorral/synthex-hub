@@ -172,20 +172,46 @@ defmodule Worker.Pipeline.Producer do
       |> Map.drop(["candidates", "oban_job_id", "attempt", "max_attempts", "chunk_id"])
       |> Map.merge(chunk["params"] || %{})
 
-    candidates
-    |> Enum.with_index()
-    |> Enum.map(fn {candidate, idx} ->
-      %Broadway.Message{
-        data: %{candidate: candidate, idx: idx},
-        metadata: %{
-          chunk_id: chunk_id,
-          total: total,
-          base_params: base_params
-        },
-        acknowledger: {__MODULE__, @ack_ref, %{chunk_id: chunk_id, idx: idx}}
-      }
-    end)
+    if batched_adapter?(chunk["adapter"]) and total > 0 do
+      # Batched adapters (e.g. mujoco_warp) score the WHOLE chunk in a
+      # single oracle call — one big GPU launch of chunk_size×episodes
+      # worlds — instead of one ~episodes-world launch per candidate.
+      # We emit a single message carrying every candidate; the processor
+      # fans the N results back into the aggregator (registered total=N).
+      [
+        %Broadway.Message{
+          data: %{batched: true, candidates: candidates},
+          metadata: %{chunk_id: chunk_id, total: total, base_params: base_params},
+          acknowledger: {__MODULE__, @ack_ref, %{chunk_id: chunk_id, idx: :batch}}
+        }
+      ]
+    else
+      # CPU swarm: one message per candidate so the whole port pool
+      # scores candidates in parallel across cores.
+      candidates
+      |> Enum.with_index()
+      |> Enum.map(fn {candidate, idx} ->
+        %Broadway.Message{
+          data: %{candidate: candidate, idx: idx},
+          metadata: %{
+            chunk_id: chunk_id,
+            total: total,
+            base_params: base_params
+          },
+          acknowledger: {__MODULE__, @ack_ref, %{chunk_id: chunk_id, idx: idx}}
+        }
+      end)
+    end
   end
+
+  # Adapters whose oracle evaluates a chunk's candidates as one batched
+  # call. Configurable so a new GPU adapter can opt in without code
+  # changes; defaults to mujoco_warp.
+  defp batched_adapter?(adapter) when is_binary(adapter) do
+    adapter in Application.get_env(:worker, :batched_adapters, ["mujoco_warp"])
+  end
+
+  defp batched_adapter?(_), do: false
 
   defp decode_body(body) when is_map(body), do: body
   defp decode_body(body) when is_binary(body), do: Jason.decode!(body)
