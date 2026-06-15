@@ -207,11 +207,20 @@ defmodule Server.Workers.ExperimentController do
     # is one big batch up front; the savings come from subsequent
     # waves.
     preds_at_start = decode_predicates(env_policy_start.predicates)
-    {states, _} = Mujoco.collect_states(preds_at_start, ctx)
-    features = Mujoco.build_features(states, ctx)
-    Logger.info("[Controller] #{length(features)} features built")
 
-    seeds = Mujoco.seeds_for(cegar_iter, 1, ctx)
+    # Pluggable counterexample source. `:random` (default) reproduces the
+    # historical on-policy collect_states + seeds_for pair exactly;
+    # `:ga_qd` swaps in the adversarial QD verifier. Everything
+    # downstream (features, optimize_bit, commit-gate) is unchanged.
+    %{states: states, seeds: seeds, counterexamples: cxs} =
+      Synthex.Verifier.supply(preds_at_start, ctx, cegar_iter)
+
+    features = Mujoco.build_features(states, ctx)
+
+    Logger.info(
+      "[Controller] #{length(features)} features built " <>
+        "(verifier=#{Map.get(ctx, :verifier, :random)}, #{length(cxs)} counterexamples)"
+    )
     initial_state = %{committed: MapSet.new(), settled_at: %{}}
 
     final_state =

@@ -206,6 +206,48 @@ defmodule Server.LocalScorer do
     end
   end
 
+  defp dispatch(%{"cmd" => "eval_regret"} = request, state) do
+    seeds = request["seeds"] || []
+
+    if seeds == [] do
+      {:error, "eval_regret: payload[\"seeds\"] must be non-empty"}
+    else
+      payload =
+        request
+        |> Map.put("name", "#{state.batch_prefix}-regret")
+        |> Map.put("cmd", "eval_regret")
+        |> Map.put("chunk_size", state.collect_chunk_size)
+        |> Map.put("candidates", seeds)
+        |> Map.delete("seeds")
+        |> Map.put("adapter", state.adapter)
+        |> maybe_put_experiment_id(state.experiment_id)
+
+      case Queue.submit_batch(payload, submitter: state.submitter) do
+        {:ok, batch} ->
+          Logger.info(
+            "[LocalScorer] eval_regret batch #{batch.id}: " <>
+              "#{batch.total_chunks} chunks, #{length(seeds)} seeds"
+          )
+
+          case await_batch_items(batch.id, state) do
+            {:ok, items} ->
+              regrets =
+                items
+                |> Enum.reject(fn item -> Map.has_key?(item, "error") end)
+                |> Enum.sort_by(fn item -> Map.get(item, "idx", 0) end)
+
+              {:ok, %{"regrets" => regrets}}
+
+            {:error, _} = err ->
+              err
+          end
+
+        {:error, reason} ->
+          {:error, "submit_batch failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
   defp dispatch(request, %{fallback: fallback}), do: fallback.(request)
 
   # ── Helpers ────────────────────────────────────────────────

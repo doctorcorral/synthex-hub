@@ -309,9 +309,22 @@ defmodule Server.Workers.ExperimentBootstrap do
       max_iters: get_int(config, "max_iters", 5),
       cegar_rounds: get_int(config, "cegar_rounds", 3),
       max_steps: get_int(config, "max_steps", 1000),
-      feature_types: feature_types(Map.get(config, "feature_types"))
+      feature_types: feature_types(Map.get(config, "feature_types")),
+      verifier: verifier(Map.get(config, "verifier")),
+      verifier_opts: verifier_opts(Map.get(config, "verifier_opts"))
     ]
   end
+
+  # Counterexample-source strategy for each CEGAR step. Defaults to
+  # `:random` (historical passive behaviour); `:ga_qd` opts into the
+  # adversarial quality-diversity verifier. Unknown values fall back to
+  # `:random` so a typo can never wedge an experiment.
+  defp verifier("ga_qd"), do: :ga_qd
+  defp verifier(:ga_qd), do: :ga_qd
+  defp verifier(_), do: :random
+
+  defp verifier_opts(opts) when is_map(opts), do: opts
+  defp verifier_opts(_), do: %{}
 
   defp tridiag_range(nil), do: nil
   defp tridiag_range([lo, hi]) when is_integer(lo) and is_integer(hi), do: lo..hi

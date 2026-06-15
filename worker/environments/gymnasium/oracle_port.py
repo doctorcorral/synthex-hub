@@ -151,8 +151,7 @@ def eval_pred(pred, state):
 # ── score_bit command ───────────────────────────────────────────────
 
 
-def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
-    bits = [1 if eval_pred(p, obs) else 0 for p in bit_preds]
+def action_from_bits(bits, cfg, bits_per_dim):
     weights = [2 ** i for i in range(bits_per_dim)]
     max_sum = sum(weights)
     n = cfg["n_action_dims"]
@@ -162,6 +161,11 @@ def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
         s = sum(weights[i] * bits[d * bits_per_dim + i] for i in range(bits_per_dim))
         actions[d] = lo + (hi - lo) * s / max_sum
     return actions
+
+
+def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
+    bits = [1 if eval_pred(p, obs) else 0 for p in bit_preds]
+    return action_from_bits(bits, cfg, bits_per_dim)
 
 
 def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, max_steps, bits_per_dim):
@@ -290,9 +294,100 @@ def handle_collect_states(job):
     return results
 
 
+# ── eval_regret command ─────────────────────────────────────────────
+#
+# Adversarial-verifier probe (see docs/ga-counterexample-verifier.md).
+# `candidates` is a list of seeds. For each seed we measure the
+# *single-bit-flip regret* at the initial state: how much return-to-go
+# improves if we flip exactly one action bit of the policy's first action
+# (then follow the policy). This is the local move the CEGAR commit-gate
+# makes, so a high-regret seed is a state where the policy is provably
+# one-bit-improvable — a concrete counterexample with a `best_bit` label.
+
+
+def _rollout_first_action(env_name, cfg, bit_preds, seed, first_action, horizon, bits_per_dim):
+    env_kwargs = cfg.get("env_kwargs", {})
+    env = gym.make(env_name, **env_kwargs)
+    try:
+        env.reset(seed=int(seed))
+        total = 0.0
+        action = first_action
+        for _ in range(horizon):
+            obs, r, term, trunc, _ = env.step(action)
+            total += float(r)
+            if term or trunc:
+                break
+            action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+        return total
+    finally:
+        env.close()
+
+
+def eval_regret_one(env_name, cfg, seed, bit_preds, horizon, bits_per_dim):
+    env_kwargs = cfg.get("env_kwargs", {})
+    env = gym.make(env_name, **env_kwargs)
+    try:
+        obs0, _ = env.reset(seed=int(seed))
+    finally:
+        env.close()
+
+    obs0_list = obs0.tolist()
+    bits = [1 if eval_pred(p, obs0_list) else 0 for p in bit_preds]
+
+    a_pi = action_from_bits(bits, cfg, bits_per_dim)
+    q_pi = _rollout_first_action(
+        env_name, cfg, bit_preds, seed, a_pi, horizon, bits_per_dim
+    )
+
+    best_q = q_pi
+    best_bit = -1
+    for i in range(len(bit_preds)):
+        flipped = list(bits)
+        flipped[i] = 1 - flipped[i]
+        a_i = action_from_bits(flipped, cfg, bits_per_dim)
+        q_i = _rollout_first_action(
+            env_name, cfg, bit_preds, seed, a_i, horizon, bits_per_dim
+        )
+        if q_i > best_q:
+            best_q = q_i
+            best_bit = i
+
+    # Low-dim behavioural fingerprint of the initial state for QD binning.
+    descriptor = [round(float(x), 3) for x in obs0_list[:4]]
+    return {
+        "seed": int(seed),
+        "regret": float(best_q - q_pi),
+        "best_bit": int(best_bit),
+        "descriptor": descriptor,
+    }
+
+
+def handle_eval_regret(job):
+    env_name = job["env_name"]
+    cfg = resolve_cfg(job)
+
+    seeds = job.get("candidates") or job.get("seeds") or [0]
+    bit_preds = job.get("bit_predicates", [])
+    bits_per_dim = int(job.get("bits_per_dim", 3))
+    horizon = int(job.get("horizon", min(int(job.get("max_steps", 1000)), 100)))
+
+    results = []
+    for i, seed in enumerate(seeds):
+        try:
+            r = eval_regret_one(env_name, cfg, seed, bit_preds, horizon, bits_per_dim)
+            r["idx"] = i
+        except Exception as e:
+            log.exception("eval_regret seed=%s failed", seed)
+            r = {"idx": i, "seed": int(seed), "error": f"{type(e).__name__}: {e}",
+                 "regret": 0.0, "best_bit": -1, "descriptor": []}
+        results.append(r)
+    return results
+
+
 COMMANDS = {
     "score_bit": handle_score_bit,
     "collect_states": handle_collect_states,
+    "eval_regret": handle_eval_regret,
 }
 
 
