@@ -68,7 +68,15 @@ defmodule Server.EnvPolicy.ConfigSig do
     "feature_types" => nil,
     "max_coeff" => 5,
     "tridiag_max_coeff" => 2,
-    "tridiag_dims" => nil
+    "tridiag_dims" => nil,
+    # Counterexample-source strategy. NOT a policy-*shape* field — it
+    # doesn't change what a predicate is — but it changes the training
+    # distribution, so an adversarially-trained policy and a
+    # random-trained one are different experiments that must NOT inherit
+    # each other's commits. Forked in `stable_encode/1` in a
+    # backward-compatible way: the default (`random`) is omitted from the
+    # digest, so every pre-existing signature is unchanged.
+    "verifier" => "random"
   }
 
   @feature_canonical %{
@@ -97,12 +105,16 @@ defmodule Server.EnvPolicy.ConfigSig do
   """
   @spec canonicalize(map()) :: map()
   def canonicalize(config) when is_map(config) do
-    @policy_shape_keys
-    |> Enum.map(fn key ->
-      raw = Map.get(config, key, Map.get(config, String.to_atom(key), Map.get(@defaults, key)))
-      {key, normalize_value(key, raw)}
-    end)
-    |> Map.new()
+    base =
+      @policy_shape_keys
+      |> Enum.map(fn key ->
+        raw = Map.get(config, key, Map.get(config, String.to_atom(key), Map.get(@defaults, key)))
+        {key, normalize_value(key, raw)}
+      end)
+      |> Map.new()
+
+    verifier_raw = Map.get(config, "verifier", Map.get(config, :verifier, @defaults["verifier"]))
+    Map.put(base, "verifier", canonical_verifier(verifier_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -153,7 +165,17 @@ defmodule Server.EnvPolicy.ConfigSig do
       end)
       |> Enum.join(",")
 
-    "{" <> body <> "}"
+    # Backward-compatible lineage fork on the verifier strategy. The
+    # default (`random`) is omitted entirely, so the digest is
+    # byte-for-byte identical to every signature minted before the
+    # verifier seam existed — no lineage is orphaned. A non-default
+    # verifier (e.g. `ga_qd`) is appended, forking it into its own
+    # lineage so an adversarial run starts from baseline rather than
+    # inheriting a random-trained policy.
+    case Map.get(map, "verifier", "random") do
+      v when v in [nil, "random"] -> "{" <> body <> "}"
+      v -> "{" <> body <> ",\"verifier\":" <> Jason.encode!(v) <> "}"
+    end
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -192,6 +214,9 @@ defmodule Server.EnvPolicy.ConfigSig do
   end
 
   defp canonical_feature(f) when is_atom(f), do: canonical_feature(Atom.to_string(f))
+
+  defp canonical_verifier(v) when v in ["ga_qd", :ga_qd], do: "ga_qd"
+  defp canonical_verifier(_), do: "random"
 
   @doc """
   Short human label for surfacing on the dashboard. e.g.
