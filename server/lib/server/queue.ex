@@ -32,6 +32,7 @@ defmodule Server.Queue do
   """
 
   import Ecto.Query
+  require Logger
   alias Server.{Batch, BatchContribution, PolicySnapshot, Repo, BrokerWorker, WorkerNode}
 
   # Smaller chunks = more frequent worker contributions = more
@@ -145,6 +146,30 @@ defmodule Server.Queue do
   # per-statement round-trip.
   @chunk_insert_group_size 500
 
+  # ── Enqueue backpressure ────────────────────────────────────
+  #
+  # Bound how many chunk jobs sit `available` in the `chunks` queue
+  # at once. Before inserting each group of chunks, if the global
+  # available-backlog is over the high-water mark, pause until the
+  # swarm drains it below the low-water mark (or a per-group wait cap
+  # elapses). This paces enqueue to worker throughput so a single
+  # oversized batch — e.g. a depth-2 tridiag candidate pool of 10^5
+  # candidates ⇒ 10^4+ chunks — can't bury Postgres under a wall of
+  # `available` rows, exhaust the Postgrex pool, and stall every other
+  # experiment (the failure mode observed on the heavy Hopper A/B).
+  #
+  # Hysteresis (drain to low-water before resuming bulk insert) avoids
+  # thrashing one group at a time at the threshold. The wait happens
+  # between groups holding NO DB connection, so it never pins a pool
+  # slot. If the swarm is genuinely dead the cap fires and we proceed
+  # (degrading to the old unthrottled behaviour) rather than blocking
+  # the submit forever. All knobs are overridable via
+  # `config :server, :enqueue_backpressure, high_water: …`.
+  @backlog_high_water 5_000
+  @backlog_low_water 2_500
+  @backlog_poll_ms 1_000
+  @backlog_max_wait_ms 300_000
+
   defp insert_batch_row(batch_id, payload, total_chunks, submitter) do
     initial_status = if total_chunks == 0, do: "completed", else: "pending"
 
@@ -178,6 +203,10 @@ defmodule Server.Queue do
       |> Stream.with_index()
       |> Stream.chunk_every(@chunk_insert_group_size)
       |> Enum.each(fn group ->
+        # Pace enqueue to worker throughput before committing this
+        # group of chunk rows (see "Enqueue backpressure" above).
+        throttle_enqueue(batch.id)
+
         changesets =
           Enum.map(group, fn {chunk, idx} ->
             chunk_id = "#{batch.id}_chunk_#{idx}"
@@ -214,6 +243,64 @@ defmodule Server.Queue do
         )
 
         {:error, Exception.message(err)}
+    end
+  end
+
+  # Count of claimable chunk jobs across all batches. Indexed by
+  # Oban's `(state, queue)` composite, so this is a cheap counting
+  # scan even with a large backlog.
+  defp available_backlog do
+    from(j in Oban.Job, where: j.state == "available" and j.queue == "chunks")
+    |> Repo.aggregate(:count, :id)
+  end
+
+  defp backlog_cfg(key, default) do
+    Application.get_env(:server, :enqueue_backpressure, [])
+    |> Keyword.get(key, default)
+  end
+
+  # Gate one group of chunk inserts on the global backlog. If we're
+  # under the high-water mark, proceed immediately; otherwise wait for
+  # the swarm to drain below the low-water mark (bounded by the wait
+  # cap). Returns `:ok` either way — backpressure never aborts a submit.
+  defp throttle_enqueue(batch_id) do
+    high = backlog_cfg(:high_water, @backlog_high_water)
+
+    if available_backlog() <= high do
+      :ok
+    else
+      drain_to_low(batch_id, 0)
+    end
+  end
+
+  defp drain_to_low(batch_id, waited_ms) do
+    low = backlog_cfg(:low_water, @backlog_low_water)
+    max_wait = backlog_cfg(:max_wait_ms, @backlog_max_wait_ms)
+    poll = backlog_cfg(:poll_ms, @backlog_poll_ms)
+    backlog = available_backlog()
+
+    cond do
+      backlog <= low ->
+        :ok
+
+      waited_ms >= max_wait ->
+        Logger.warning(
+          "[Queue] backpressure cap hit for #{batch_id}: backlog=#{backlog} still above " <>
+            "low-water=#{low} after #{waited_ms}ms; proceeding (swarm may be saturated/idle)"
+        )
+
+        :ok
+
+      true ->
+        if rem(waited_ms, 15_000) == 0 do
+          Logger.info(
+            "[Queue] backpressure: backlog=#{backlog} > low-water=#{low}; pausing enqueue " <>
+              "for #{batch_id} (waited #{waited_ms}ms)"
+          )
+        end
+
+        Process.sleep(poll)
+        drain_to_low(batch_id, waited_ms + poll)
     end
   end
 

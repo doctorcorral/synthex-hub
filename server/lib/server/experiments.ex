@@ -235,20 +235,58 @@ defmodule Server.Experiments do
 
   @doc "Transition an experiment to failed with an error message."
   def mark_failed(%Experiment{} = exp, error_message) do
-    update_state(exp, %{
-      "status" => "failed",
-      "completed_at" => DateTime.utc_now(),
-      "error" => error_message
-    })
+    result =
+      update_state(exp, %{
+        "status" => "failed",
+        "completed_at" => DateTime.utc_now(),
+        "error" => error_message
+      })
+
+    reap_in_flight(exp, "failed")
+    result
   end
 
   @doc "Transition an experiment to cancelled (operator-initiated)."
   def mark_cancelled(%Experiment{} = exp, reason \\ nil) do
-    update_state(exp, %{
-      "status" => "cancelled",
-      "completed_at" => DateTime.utc_now(),
-      "error" => reason
-    })
+    result =
+      update_state(exp, %{
+        "status" => "cancelled",
+        "completed_at" => DateTime.utc_now(),
+        "error" => reason
+      })
+
+    reap_in_flight(exp, "cancelled")
+    result
+  end
+
+  # Immediately cancel the experiment's outstanding chunk jobs on a
+  # terminal transition. Without this, a cancelled/failed experiment's
+  # `available` chunks sit claimable until the OrphanReaper cron runs
+  # (every 2 min) — wasting worker cycles on dead work and leaving
+  # thousands of `available` rows pressuring Postgrex. The reaper
+  # remains as the defense-in-depth safety net; this just closes the
+  # latency gap on the common path. Best-effort: a failure here must
+  # never block the state transition.
+  defp reap_in_flight(%Experiment{id: id, env_name: env_name}, status) do
+    case Server.Queue.cancel_experiment_in_flight_batches(id) do
+      {:ok, %{batches: 0, jobs: 0}} ->
+        :ok
+
+      {:ok, %{batches: n_batches, jobs: n_jobs}} ->
+        log_event!(
+          "warn",
+          "master",
+          "reaped #{n_jobs} chunk job(s) across #{n_batches} batch(es) on #{status}: #{env_name}",
+          env_name: env_name,
+          experiment_id: id,
+          metadata: %{"cancelled_jobs" => n_jobs, "cancelled_batches" => n_batches, "trigger" => status}
+        )
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   @doc "List experiments newest first."
