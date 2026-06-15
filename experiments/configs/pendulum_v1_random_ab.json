@@ -1,0 +1,22 @@
+{
+  "env_key": "pendulum_v1",
+  "env_name": "Pendulum-v1",
+  "config": {
+    "adapter": "mujoco",
+    "bits_per_dim": 3,
+    "depth": 1,
+    "max_coeff": 4,
+    "tridiag_max_coeff": 2,
+    "feature_types": ["axis", "diag", "sq_diag", "tridiag"],
+    "n_episodes": 16,
+    "top_k": 12,
+    "max_iters": 5,
+    "cegar_rounds": 3,
+    "max_steps": 200,
+    "chunk_size": 25,
+    "collect_states_chunk_size": 8,
+    "state_stride": 5,
+    "poll_interval_ms": 1000,
+    "verifier": "random"
+  }
+}

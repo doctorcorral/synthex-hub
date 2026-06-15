@@ -208,6 +208,21 @@ defmodule Server.Workers.ExperimentController do
     # waves.
     preds_at_start = decode_predicates(env_policy_start.predicates)
 
+    # Held-out validation of the policy BEFORE this step's commits. The
+    # step-level validation guard compares this to the post-step value
+    # and reverts if the net effect regressed validation (the commit
+    # gate only sees the small per-round training-seed block, which can
+    # overfit). Skipped entirely when the guard is disabled.
+    val_seeds = Mujoco.validation_seeds()
+
+    val_before =
+      if validation_guard?(exp.config) do
+        {vb_total, _} = Mujoco.validate(preds_at_start, val_seeds, ctx)
+        vb_total / length(val_seeds)
+      else
+        nil
+      end
+
     # Pluggable counterexample source. `:random` (default) reproduces the
     # historical on-policy collect_states + seeds_for pair exactly;
     # `:ga_qd` swaps in the adversarial QD verifier. Everything
@@ -254,36 +269,70 @@ defmodule Server.Workers.ExperimentController do
     final_preds = decode_predicates(env_policy_after.predicates)
     accepted_in_step = MapSet.size(final_state.committed)
 
-    val_seeds = Mujoco.validation_seeds()
     {val_total, val_survived} = Mujoco.validate(final_preds, val_seeds, ctx)
-    val_avg = val_total / length(val_seeds)
+    val_after = val_total / length(val_seeds)
+
+    # Step-level validation guard: if this step's commits regressed the
+    # held-out validation average, revert the lineage to where it
+    # started. This protects against the commit gate overfitting the
+    # small per-round training-seed block (which on brittle envs commits
+    # bits that improve training seeds while wrecking validation).
+    {env_policy_final, val_avg, reverted?} =
+      if val_before != nil and accepted_in_step > 0 and
+           val_after < val_before - val_guard_epsilon(exp.config) do
+        {:ok, reverted_ep} =
+          EnvPolicies.revert_step(
+            env_policy_after,
+            env_policy_start,
+            after_step,
+            val_before,
+            val_after
+          )
+
+        Logger.warning(
+          "[Controller] #{exp.env_name} step #{cegar_iter}: validation regressed " <>
+            "#{Float.round(val_before, 2)} → #{Float.round(val_after, 2)} over " <>
+            "#{accepted_in_step} commit(s); reverted lineage to v=#{env_policy_start.policy_version} " <>
+            "predicates (now v=#{reverted_ep.policy_version})"
+        )
+
+        {reverted_ep, val_before, true}
+      else
+        {env_policy_after, val_after, false}
+      end
 
     Logger.info(
       "[Controller] #{exp.env_name} step done: " <>
-        "#{accepted_in_step} commits, v=#{env_policy_after.policy_version}, " <>
-        "validation avg=#{Float.round(val_avg, 2)}"
+        "#{accepted_in_step} commits#{if reverted?, do: " (REVERTED — validation regressed)", else: ""}, " <>
+        "v=#{env_policy_final.policy_version}, validation avg=#{Float.round(val_avg, 2)}"
     )
 
     Experiments.log_event!(
       "info",
       "master",
       "step done: #{exp.env_name} step #{cegar_iter}/#{ctx.cegar_rounds} " <>
-        "v=#{env_policy_after.policy_version} avg=#{Float.round(val_avg, 2)} " <>
-        "(#{accepted_in_step} commits)",
+        "v=#{env_policy_final.policy_version} avg=#{Float.round(val_avg, 2)} " <>
+        "(#{accepted_in_step} commits#{if reverted?, do: ", reverted", else: ""})",
       env_name: exp.env_name,
       experiment_id: exp.id,
       metadata: %{
         "cegar_iter" => cegar_iter,
-        "policy_version" => env_policy_after.policy_version,
+        "policy_version" => env_policy_final.policy_version,
         "validation_avg" => val_avg,
         "validation_survived" => val_survived,
+        "validation_before" => val_before,
+        "validation_after" => val_after,
         "accepted_in_step" => accepted_in_step,
+        "reverted" => reverted?,
         "dispatch_mode" =>
           if(bit_concurrency(exp.config) <= 1, do: "sequential", else: "parallel")
       }
     )
 
-    advance_or_complete(after_step, ctx, val_avg)
+    # Re-read the session: revert_step resets the cached best_reward, so
+    # advance_or_complete must see the post-revert experiment row.
+    {:ok, after_step_final} = Experiments.get(exp.id)
+    advance_or_complete(after_step_final, ctx, val_avg)
   end
 
   # ── One pass over the open bits ─────────────────────────────
@@ -779,6 +828,19 @@ defmodule Server.Workers.ExperimentController do
   # high-variance envs.
   defp acceptance_epsilon(%{"acceptance_epsilon" => v}) when is_number(v), do: v * 1.0
   defp acceptance_epsilon(_), do: 0.0
+
+  # Step-level validation guard. The commit gate enforces monotonicity
+  # on the small per-round *training* seed block, which can overfit and
+  # regress the held-out *validation* average. When enabled (default),
+  # the controller reverts a step whose net effect regresses validation
+  # by more than `val_guard_epsilon`. Disable with `"validation_guard":
+  # false` for the legacy training-only behaviour.
+  defp validation_guard?(%{"validation_guard" => false}), do: false
+  defp validation_guard?(%{"validation_guard" => "false"}), do: false
+  defp validation_guard?(_), do: true
+
+  defp val_guard_epsilon(%{"val_guard_epsilon" => v}) when is_number(v), do: v * 1.0
+  defp val_guard_epsilon(_), do: 0.0
 
   # Transient pool blips (DBConnection.ConnectionError "request was
   # dropped from queue") shouldn't burn through Oban's 3-attempt

@@ -30,7 +30,7 @@ defmodule Server.EnvPolicies do
   """
 
   import Ecto.Query
-  alias Server.{EnvPolicy, Experiment, Repo}
+  alias Server.{EnvPolicy, Experiment, PolicyVersion, Repo}
   alias Server.EnvPolicy.ConfigSig
 
   @doc """
@@ -175,6 +175,64 @@ defmodule Server.EnvPolicies do
 
   def ensure_baseline(%EnvPolicy{} = env_policy, _baseline, _n_episodes) do
     {:ok, env_policy}
+  end
+
+  @doc """
+  Undo a step's commits by restoring the lineage to a prior predicate
+  vector. Used by the controller's step-level validation guard: the
+  commit gate enforces monotonicity on the small per-round *training*
+  seed block, which can overfit and regress the held-out *validation*
+  average. When a step's net effect regresses validation, the
+  controller calls this to roll the lineage back to `start`.
+
+  The version is bumped *forward* (not decremented): we append a revert
+  version carrying `start`'s predicates so the version space stays
+  monotonic, the `(env_policy_id, version)` audit key never collides,
+  and the revert itself is recorded in `policy_versions` for forensics.
+  The session's cached `best_reward` is reset to the restored value.
+  """
+  @spec revert_step(EnvPolicy.t(), EnvPolicy.t(), Experiment.t(), float(), float()) ::
+          {:ok, EnvPolicy.t()}
+  def revert_step(%EnvPolicy{} = current, %EnvPolicy{} = start, %Experiment{} = exp, val_before, val_after) do
+    Repo.transaction(fn ->
+      new_version = current.policy_version + 1
+
+      {:ok, reverted} =
+        current
+        |> Ecto.Changeset.change(
+          predicates: start.predicates,
+          policy_version: new_version,
+          best_reward: start.best_reward,
+          n_episodes: start.n_episodes
+        )
+        |> Repo.update()
+
+      {:ok, _audit} =
+        %PolicyVersion{}
+        |> PolicyVersion.changeset(%{
+          "env_policy_id" => current.id,
+          "experiment_id" => exp.id,
+          "version" => new_version,
+          "predicates" => start.predicates,
+          "bit_idx" => -1,
+          "prev_reward" => current.best_reward,
+          "new_reward" => start.best_reward || 0.0,
+          "metadata" => %{
+            "reason" => "validation_guard_revert",
+            "validation_before" => val_before,
+            "validation_after" => val_after,
+            "reverted_to_version" => start.policy_version
+          }
+        })
+        |> Repo.insert()
+
+      {:ok, _exp} =
+        exp
+        |> Ecto.Changeset.change(best_reward: start.best_reward)
+        |> Repo.update()
+
+      reverted
+    end)
   end
 
   @doc "List env_policies for an env_name, newest-committed-first."

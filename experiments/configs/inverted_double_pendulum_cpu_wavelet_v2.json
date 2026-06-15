@@ -1,0 +1,21 @@
+{
+  "env_key": "inverted_double_pendulum",
+  "env_name": "InvertedDoublePendulum-v5",
+  "config": {
+    "adapter": "mujoco",
+    "bits_per_dim": 6,
+    "depth": 1,
+    "max_coeff": 5,
+    "tridiag_max_coeff": 2,
+    "feature_types": ["axis", "diag", "sq_diag", "tridiag", "wavelet_box", "wavelet_ricker"],
+    "n_episodes": 10,
+    "top_k": 20,
+    "max_iters": 5,
+    "cegar_rounds": 3,
+    "max_steps": 1000,
+    "chunk_size": 10,
+    "collect_states_chunk_size": 4,
+    "state_stride": 10,
+    "poll_interval_ms": 1000
+  }
+}
