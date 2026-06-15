@@ -230,19 +230,28 @@ defmodule Server.EnvPolicy.ConfigSig do
     feats = Map.get(canonical, "feature_types")
     max_coeff = Map.get(canonical, "max_coeff")
     tridiag = Map.get(canonical, "tridiag_dims")
+    verifier = Map.get(canonical, "verifier")
 
     parts = [
       bits && "b=#{bits}",
       depth && "d=#{depth}",
       feats && "f=#{Enum.join(feats, ",")}",
       max_coeff && max_coeff != @defaults["max_coeff"] && "c=#{max_coeff}",
-      tridiag && "t=#{Enum.join(tridiag, ":")}"
+      tridiag && "t=#{Enum.join(tridiag, ":")}",
+      # Surface the counterexample strategy on the card. The default
+      # (`random`) is omitted so existing cards are unchanged — its
+      # absence means standard CEGAR; presence of a verifier badge means
+      # an adversarial source is driving the search.
+      verifier && verifier != @defaults["verifier"] && verifier_badge(verifier)
     ]
 
     parts
     |> Enum.filter(& &1)
     |> Enum.join(" · ")
   end
+
+  defp verifier_badge("ga_qd"), do: "GAQD"
+  defp verifier_badge(v), do: "verifier=#{v}"
 
   @doc "Fields whose change forks a new policy lineage. Exposed for tests."
   def policy_shape_keys, do: @policy_shape_keys
