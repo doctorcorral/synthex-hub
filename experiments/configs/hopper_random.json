@@ -1,0 +1,22 @@
+{
+  "env_key": "hopper",
+  "env_name": "Hopper-v5",
+  "config": {
+    "adapter": "mujoco",
+    "bits_per_dim": 3,
+    "depth": 2,
+    "max_coeff": 5,
+    "tridiag_max_coeff": 3,
+    "feature_types": ["axis", "diag", "sq_diag", "tridiag"],
+    "n_episodes": 16,
+    "top_k": 20,
+    "max_iters": 5,
+    "cegar_rounds": 3,
+    "max_steps": 1000,
+    "chunk_size": 10,
+    "collect_states_chunk_size": 4,
+    "state_stride": 10,
+    "poll_interval_ms": 1000,
+    "verifier": "random"
+  }
+}
