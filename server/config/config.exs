@@ -27,14 +27,16 @@ config :server, Oban,
   repo: Server.Repo,
   queues: [chunks: [limit: 1, paused: true], master: 4, system: 5],
   plugins: [
-    # 1 day, was 7. Chunk jobs churn fast (a stuck worker can spawn
-    # and cancel thousands per hour), and at ~250k terminal rows the
-    # unindexed `complete_chunk` lookup seq-scanned past the worker's
-    # 30s HTTP timeout (see migration 20260611000001). Per-chunk
-    # results on `oban_jobs.args` are consumed by end-of-batch
-    # readers within minutes of completion, so a day of retention is
-    # far more than enough — and keeps Neon storage/egress in check.
-    {Oban.Plugins.Pruner, max_age: 60 * 60 * 24},
+    # Per-chunk results on `oban_jobs.args` are consumed by
+    # end-of-batch readers within MINUTES of completion, so terminal
+    # chunk rows have no value after that — they're pure bloat that
+    # slows every COUNT(available)/claim SKIP LOCKED/insert against the
+    # table (the contention behind the 57014 statement timeouts). With
+    # the per-bit pool now bounded (synthex `max_candidates`), chunk
+    # churn is far lower, but short retention compounds the win. 3h
+    # (was 24h) keeps a generous margin for a slow controller to fetch
+    # results while keeping the table small.
+    {Oban.Plugins.Pruner, max_age: 60 * 60 * 3},
     {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(5)},
     {Oban.Plugins.Cron, crontab: [
       {"*/5 * * * *", Server.Jobs.ReapWorkers},
