@@ -44,7 +44,10 @@ config :server, Oban,
       # Keep claim_chunk's planner stats fresh against bursty
       # available-chunk counts; without this a stale "1 available
       # row" estimate makes claim_chunk pick an O(N²) plan and hang.
-      {"*/3 * * * *", Server.Jobs.AnalyzeObanJobs}
+      {"*/3 * * * *", Server.Jobs.AnalyzeObanJobs},
+      # Sweep consumed per-chunk results (narrow chunk_results table)
+      # that nothing prunes otherwise. Hourly is plenty — rows live ~6h.
+      {"0 * * * *", Server.Jobs.PruneChunkResults}
     ]}
   ]
 

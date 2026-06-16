@@ -146,6 +146,13 @@ defmodule Server.Queue do
   # per-statement round-trip.
   @chunk_insert_group_size 500
 
+  # Page size for the keyset-paginated `chunk_results` read in
+  # `fetch_batch_chunks/1`. Bounds rows-per-statement (and thus peak
+  # egress + memory) on end-of-batch result collection, so a giant
+  # batch reads in many short statements instead of one timeout-prone
+  # mega-query.
+  @fetch_page_size 500
+
   # ── Enqueue backpressure ────────────────────────────────────
   #
   # Bound how many chunk jobs sit `available` in the `chunks` queue
@@ -324,7 +331,7 @@ defmodule Server.Queue do
   Look up a batch by id. Returns the full row including the
   (legacy) `results` field, which is no longer populated for
   batches created after the egress-cost rework — use
-  `fetch_batch_items/1` to get per-chunk items instead.
+  `fetch_batch_chunks/1` to get per-chunk items instead.
   """
   def get_batch(batch_id) do
     case Repo.get(Batch, batch_id) do
@@ -334,19 +341,27 @@ defmodule Server.Queue do
   end
 
   @doc """
-  Reassemble per-chunk results for a batch by reading the
-  per-chunk `oban_jobs.args["results"]` rows directly.
+  Reassemble per-chunk results for a batch from the narrow
+  `chunk_results` table, keyset-paginated by `chunk_index`.
 
-  ## Why not `Batch.results`?
+  ## Storage history (why this shape)
 
-  Per-chunk items used to also be pushed onto the `Batch.results`
-  jsonb-array column on every chunk submit. That made *every*
-  chunk completion rewrite the full TOASTed array and pulled the
-  bloated row back over the wire on the immediately-following
-  `Repo.get!(Batch, ...)`. For a 10k-chunk Ant `collect_states`
-  batch, that came out to multi-TB Postgres↔app traffic. Now we
-  store items in exactly one place: on the per-chunk oban_jobs
-  row, written once on completion and read once here.
+  Per-chunk items have lived in three places over time:
+
+    1. Pushed onto a `Batch.results` jsonb array on every chunk
+       submit — every push rewrote the full TOASTed array and the
+       post-write `Repo.get!(Batch, ...)` dragged the bloated row
+       back, an O(N²) egress catastrophe (multi-TB for a 10k-chunk
+       batch).
+    2. On the owning `oban_jobs.args["results"]` — one place, written
+       once. But that wide row also carries the chunk's input
+       `candidates`+`params`, so reading every completed chunk's
+       results pulled all of that back too, and the rows died with
+       Oban's prune window.
+    3. (current) The narrow `chunk_results` table: `(batch_id,
+       chunk_index, results)` only. Written once on completion, read
+       back here a bounded page at a time, and independent of Oban's
+       prune lifecycle.
 
   ## Return shape
 
@@ -372,6 +387,69 @@ defmodule Server.Queue do
   used to do against `Batch.results`.
   """
   def fetch_batch_chunks(batch_id) when is_binary(batch_id) do
+    # Primary path: keyset-paginate the narrow `chunk_results` table by
+    # `chunk_index`. Each page is a short, bounded read (≤
+    # @fetch_page_size rows of just `(chunk_index, results)`), so a
+    # 10^4-chunk batch no longer drags every wide `oban_jobs.args`
+    # (candidates+params+results) back in one statement that blows the
+    # timeout.
+    case paginate_chunk_results(batch_id, -1, []) do
+      [] ->
+        # No rows in chunk_results: either a genuinely empty batch
+        # (returns [] — fine) or a batch whose chunks completed BEFORE
+        # this table existed, whose results still live on the old
+        # oban_jobs.args["results"]. Fall back so straddling/legacy
+        # batches stay readable.
+        legacy_fetch_batch_chunks(batch_id)
+
+      chunks ->
+        {:ok, chunks}
+    end
+  end
+
+  # Keyset pagination over chunk_results. `after_idx` is the highest
+  # chunk_index already collected (-1 to start). Recurses a page at a
+  # time until a short page signals the tail. jsonb `results` decodes
+  # to an Elixir list via the configured Postgrex JSON types.
+  defp paginate_chunk_results(batch_id, after_idx, acc) do
+    rows =
+      Repo.query!(
+        """
+        SELECT chunk_index, results
+        FROM chunk_results
+        WHERE batch_id = $1 AND chunk_index > $2
+        ORDER BY chunk_index ASC
+        LIMIT $3
+        """,
+        [batch_id, after_idx, @fetch_page_size],
+        timeout: 60_000
+      ).rows
+
+    page =
+      Enum.map(rows, fn [idx, items] ->
+        %{"chunk_index" => idx, "items" => decode_items(items)}
+      end)
+
+    if length(page) < @fetch_page_size do
+      acc ++ page
+    else
+      last_idx = page |> List.last() |> Map.fetch!("chunk_index")
+      paginate_chunk_results(batch_id, last_idx, acc ++ page)
+    end
+  end
+
+  # Raw `Repo.query!` returns a jsonb column as its undecoded JSON text
+  # (Ecto's JSON codec runs in the schema loader, not Postgrex's type
+  # server), so decode here. The list/`nil` clauses keep us robust if a
+  # future Postgrex json-types config starts decoding eagerly.
+  defp decode_items(items) when is_binary(items), do: Jason.decode!(items)
+  defp decode_items(items) when is_list(items), do: items
+  defp decode_items(_), do: []
+
+  # Pre-`chunk_results` read path: results on oban_jobs.args["results"].
+  # Retained only for batches whose chunks completed before the
+  # migration; new batches never hit this.
+  defp legacy_fetch_batch_chunks(batch_id) do
     rows =
       from(j in Oban.Job,
         where:
@@ -386,11 +464,6 @@ defmodule Server.Queue do
           items: fragment("? -> ?", j.args, ^"results")
         }
       )
-      # Large result fetches (a 10^4-chunk batch drags back every
-      # chunk's `args.results` jsonb in one query) can exceed the 15s
-      # DBConnection default under load and get cancelled (57014 /
-      # "ssl recv: closed"). Give the read room to complete rather than
-      # crash the controller mid result-collection.
       |> Repo.all(timeout: 60_000)
 
     chunks =
@@ -621,29 +694,29 @@ defmodule Server.Queue do
         true ->
           batch_id = job.args["batch_id"]
           chunk_index = job.args["chunk_index"]
-          updated_args = Map.put(job.args, "results", results)
           now = DateTime.utc_now()
 
+          # Flip the job to completed WITHOUT writing results into its
+          # `args`. Results now live in the narrow `chunk_results`
+          # table (see `store_chunk_results/3` below) so the wide
+          # oban_jobs row stays small and the end-of-batch read never
+          # has to drag candidates+params back just to get results.
           {:ok, _} =
             Repo.update(
               Ecto.Changeset.change(job,
                 state: "completed",
-                completed_at: now,
-                args: updated_args
+                completed_at: now
               )
             )
 
-          # NB: we used to also `push: [results: ^...]` into
-          # `Batch.results` here. That's gone. The per-chunk items
-          # are already stored on the owning oban_jobs row in
-          # `args["results"]` (see line ~422 above) — pushing them
-          # a second time into a jsonb-array column was an O(N²)
-          # egress catastrophe, because every push rewrote the
-          # full TOASTed array and the post-write `Repo.get!`
-          # then dragged the bloated row back across the wire.
-          # End-of-batch consumers (LocalScorer, send_full_batch)
-          # now read items from oban_jobs via
-          # `Server.Queue.fetch_batch_items/1`.
+          # Per-chunk items go into `chunk_results`, written once here.
+          # We used to stuff them into `oban_jobs.args["results"]` (and,
+          # before that, push them into a `Batch.results` jsonb array —
+          # an O(N²) egress catastrophe). The narrow table decouples
+          # results from Oban's prune lifecycle and lets the reader
+          # keyset-paginate instead of pulling every wide row at once.
+          store_chunk_results(batch_id, chunk_index, results)
+
           {1, _} =
             from(b in Batch,
               where: b.id == ^batch_id,
@@ -689,6 +762,28 @@ defmodule Server.Queue do
           :ok
       end
     end)
+  end
+
+  # Persist one chunk's result items into the narrow `chunk_results`
+  # table. Idempotent: a duplicate chunk submission (the job is already
+  # `completed`) is short-circuited upstream, but we also guard here
+  # with `ON CONFLICT DO NOTHING` so a rete-delivered completion can't
+  # error on the unique `(batch_id, chunk_index)` index. Encodes the
+  # item list to a jsonb literal in Elixir (deterministic) rather than
+  # relying on implicit list→jsonb param coercion.
+  defp store_chunk_results(batch_id, chunk_index, results) do
+    encoded = Jason.encode!(results || [])
+
+    Repo.query!(
+      """
+      INSERT INTO chunk_results (batch_id, chunk_index, results, inserted_at)
+      VALUES ($1, $2, $3::jsonb, now())
+      ON CONFLICT (batch_id, chunk_index) DO NOTHING
+      """,
+      [batch_id, chunk_index, encoded]
+    )
+
+    :ok
   end
 
   # Upsert one row per (batch_id, worker_id). On first chunk: create
