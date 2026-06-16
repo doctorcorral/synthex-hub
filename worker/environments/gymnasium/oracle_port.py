@@ -168,11 +168,17 @@ def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
     return action_from_bits(bits, cfg, bits_per_dim)
 
 
-def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, max_steps, bits_per_dim):
+def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, max_steps,
+                        bits_per_dim, want_per_seed=False):
     test_preds = list(bit_preds)
     test_preds[target_bit] = candidate
     total = 0.0
     successes = 0
+    # Per-episode returns, in `seeds` order, collected only when the
+    # caller asks (validation tail/CVaR metrics). Kept off the wire for
+    # normal candidate scoring, where it would multiply response size by
+    # n_seeds for no use.
+    per_seed = [] if want_per_seed else None
     env_kwargs = cfg.get("env_kwargs", {})
 
     for seed in seeds:
@@ -187,12 +193,17 @@ def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, 
                 if term or trunc:
                     break
             total += ep_r
+            if want_per_seed:
+                per_seed.append(ep_r)
             if ep_r > cfg["success_threshold"]:
                 successes += 1
         finally:
             env.close()
 
-    return {"reward": total, "landings": successes}
+    result = {"reward": total, "landings": successes}
+    if want_per_seed:
+        result["per_seed"] = per_seed
+    return result
 
 
 # ── dispatch ────────────────────────────────────────────────────────
@@ -208,12 +219,17 @@ def handle_score_bit(job):
     seeds = job.get("seeds", [0])
     max_steps = int(job.get("max_steps", 1000))
     bits_per_dim = int(job.get("bits_per_dim", 3))
+    # Opt-in per-seed returns for validation tail metrics. Absent/false
+    # for normal scoring, so an older hub that never sets it is
+    # unaffected; a newer hub gets per-seed only on the validation call.
+    want_per_seed = bool(job.get("want_per_seed", False))
 
     results = []
     for i, cand in enumerate(candidates):
         try:
             r = score_bit_candidate(
-                env_name, cfg, cand, bit_preds, target_bit, seeds, max_steps, bits_per_dim
+                env_name, cfg, cand, bit_preds, target_bit, seeds, max_steps, bits_per_dim,
+                want_per_seed=want_per_seed,
             )
             r["idx"] = i
         except Exception as e:

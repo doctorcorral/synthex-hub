@@ -268,7 +268,11 @@ defmodule Server.LocalScorer do
      %{
        "scores" => scores,
        "baseline_reward" => Map.get(baseline, "reward", 0.0),
-       "baseline_landings" => Map.get(baseline, "landings", 0)
+       "baseline_landings" => Map.get(baseline, "landings", 0),
+       # Present only when the request set `want_per_seed` AND the worker
+       # is new enough to honour it (validation tail metrics). `nil`
+       # otherwise; callers fall back to mean-only.
+       "baseline_per_seed" => Map.get(baseline, "per_seed")
      }}
   end
 

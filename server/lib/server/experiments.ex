@@ -352,7 +352,19 @@ defmodule Server.Experiments do
       config_data: env_policy.config_data,
       policy_version: env_policy.policy_version,
       n_episodes: env_policy.n_episodes || @default_n_episodes,
-      # The lineage IS the all-time-best policy. Normalize to per-episode.
+      # Canonical, cross-run-comparable performance: per-episode mean on
+      # the fixed held-out validation block (already per-episode; no
+      # normalization). nil until the lineage runs a step under a
+      # validation-aware controller.
+      validation_avg: env_policy.validation_avg,
+      validation_version: env_policy.validation_version,
+      validation_stale: validation_stale?(env_policy),
+      # Tail/robustness of the held-out block (worst-10% mean etc.), or
+      # nil if the worker can't emit per-seed returns yet.
+      validation_tail: env_policy.validation_tail,
+      # `best_reward` is a TRAINING high-water-mark (sum over per-round
+      # scoring seeds, max-selected). Kept for forensics/back-compat,
+      # but `validation_avg` is the honest headline. Normalize to per-ep.
       best_reward: normalize_reward(env_policy.best_reward, env_policy.n_episodes || @default_n_episodes),
       best_reward_sum: env_policy.best_reward,
       baseline_reward: normalize_reward(env_policy.baseline_reward, env_policy.n_episodes || @default_n_episodes),
@@ -744,4 +756,15 @@ defmodule Server.Experiments do
   def normalize_reward(_value, n_episodes) when n_episodes <= 0, do: nil
   def normalize_reward(value, n_episodes) when is_number(value), do: value / n_episodes
   def normalize_reward(_value, _n_episodes), do: nil
+
+  # `validation_avg` lags `policy_version` if a commit landed after the
+  # last step-end validation measurement. Flag it so the dashboard can
+  # mark a held-out number as not-yet-reflecting the very latest bit.
+  defp validation_stale?(%EnvPolicy{validation_avg: nil}), do: true
+
+  defp validation_stale?(%EnvPolicy{validation_version: v, policy_version: pv})
+       when is_integer(v) and is_integer(pv),
+       do: v < pv
+
+  defp validation_stale?(_), do: true
 end

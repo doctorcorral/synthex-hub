@@ -269,8 +269,9 @@ defmodule Server.Workers.ExperimentController do
     final_preds = decode_predicates(env_policy_after.predicates)
     accepted_in_step = MapSet.size(final_state.committed)
 
-    {val_total, val_survived} = Mujoco.validate(final_preds, val_seeds, ctx)
+    {val_total, val_survived, val_per_seed} = Mujoco.validate_detailed(final_preds, val_seeds, ctx)
     val_after = val_total / length(val_seeds)
+    val_tail = tail_stats(val_per_seed)
 
     # Step-level validation guard: if this step's commits regressed the
     # held-out validation average, revert the lineage to where it
@@ -328,6 +329,12 @@ defmodule Server.Workers.ExperimentController do
           if(bit_concurrency(exp.config) <= 1, do: "sequential", else: "parallel")
       }
     )
+
+    # Stamp the canonical held-out metric on the lineage (per-episode
+    # mean on the fixed validation block, at the final policy version).
+    # This is the cross-run-comparable number the dashboard headlines,
+    # vs the training-block high-water-mark `best_reward`.
+    EnvPolicies.record_validation(env_policy_final, val_avg, env_policy_final.policy_version, val_tail)
 
     # Re-read the session: revert_step resets the cached best_reward, so
     # advance_or_complete must see the post-revert experiment row.
@@ -841,6 +848,39 @@ defmodule Server.Workers.ExperimentController do
 
   defp val_guard_epsilon(%{"val_guard_epsilon" => v}) when is_number(v), do: v * 1.0
   defp val_guard_epsilon(_), do: 0.0
+
+  # Tail/robustness statistics of the held-out per-seed return
+  # distribution. `cvar10` is the mean of the worst 10% of episodes —
+  # the average-case-blind signal that tells whether a method buys (or
+  # destroys) worst-case behaviour. `nil` when the worker didn't emit
+  # per-seed returns (older worker) so we degrade to mean-only.
+  defp tail_stats(per_seed) when is_list(per_seed) and per_seed != [] do
+    nums = Enum.filter(per_seed, &is_number/1)
+
+    case nums do
+      [] ->
+        nil
+
+      _ ->
+        sorted = Enum.sort(nums)
+        n = length(sorted)
+        k = max(1, div(n, 10))
+        worst_k = Enum.take(sorted, k)
+        cvar10 = Enum.sum(worst_k) / k
+        mean = Enum.sum(sorted) / n
+        p10 = Enum.at(sorted, min(n - 1, max(0, div(n, 10) - 1)))
+
+        %{
+          "cvar10" => cvar10,
+          "worst" => List.first(sorted),
+          "p10" => p10,
+          "mean" => mean,
+          "n" => n
+        }
+    end
+  end
+
+  defp tail_stats(_), do: nil
 
   # Transient pool blips (DBConnection.ConnectionError "request was
   # dropped from queue") shouldn't burn through Oban's 3-attempt

@@ -1096,18 +1096,52 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         health === 'slow'    ? 'slow'    :
         isLive               ? 'live'    : restLabel;
 
-      // ── primary score line ─────────────────────────────────
-      // Order of preference:
+      // ── headline: held-out validation ──────────────────────
+      // The canonical, cross-run-comparable number: per-episode mean
+      // on the FIXED held-out validation seed block. Unlike the
+      // training high-water-mark below, it's measured on the same
+      // seeds every time, so it isn't inflated by max-selection over
+      // thousands of noisy candidates. This is the honest headline.
+      let valRow = '';
+      if (r.validation_avg !== null && r.validation_avg !== undefined) {
+        const staleTag = r.validation_stale
+          ? '<span class="label" style="margin-left:6px;color:var(--fg-faint)" ' +
+              'title="A bit was committed after the last held-out measurement; ' +
+              'this number lags the current policy version.">(stale)</span>'
+          : '';
+        valRow =
+          '<div class="exp-row">' +
+            '<span class="label" title="Per-episode mean on the fixed held-out ' +
+              'validation seeds — the honest, cross-run-comparable score.">held-out</span>' +
+            '<span class="val score">' + fmtScore(r.validation_avg) + '</span>' +
+            staleTag +
+          '</div>';
+
+        // Tail/robustness: mean of the worst 10% of held-out episodes.
+        // Average-case held-out can't see whether a policy is brittle
+        // in the tail; this can. Shown only when the worker emitted
+        // per-seed returns.
+        var t = r.validation_tail;
+        if (t && (t.cvar10 !== null && t.cvar10 !== undefined)) {
+          valRow +=
+            '<div class="exp-row">' +
+              '<span class="label" title="Mean return of the worst 10% of held-out ' +
+                'episodes \u2014 worst-case/robustness signal the mean hides.">worst-10%</span>' +
+              '<span class="val">' + fmtScore(t.cvar10) + '</span>' +
+            '</div>';
+        }
+      }
+
+      // ── training high-water-mark line ──────────────────────
+      // `best_reward` is a TRAINING-block high-water-mark (sum over
+      // per-round scoring seeds, max-selected over many candidates).
+      // It overstates true performance and isn't comparable across
+      // runs, so it's labelled "training" and shown beneath the
+      // held-out headline. Order of preference for which run's number:
       //   1. Active experiment's running best (`active.best_reward`)
-      //      — live, updates after every accepted bit.
-      //   2. Last terminal run's best (`last_run.best_reward`) —
-      //      completed clean, or stopped after producing accepted
-      //      bits. Each accepted bit went through CommitGate's
-      //      atomic transaction, so the policy artefact at that
-      //      reward existed at some point and is just as legit as
-      //      a clean-completed run's number.
-      //   3. All-time best across runs (`best_reward`).
-      //   4. "awaiting first bit" placeholder.
+      //   2. Last terminal run's best (`last_run.best_reward`)
+      //   3. All-time best across runs (`best_reward`)
+      //   4. "awaiting first bit" placeholder
       let scoreRow = '';
       if (isLive && r.active.best_reward !== null &&
                     r.active.best_reward !== undefined) {
@@ -1119,26 +1153,29 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         const deltaSpan = fmtDeltaSpan(delta, 'vs baseline');
         scoreRow =
           '<div class="exp-row">' +
-            '<span class="label">current best</span>' +
+            '<span class="label" title="Training high-water-mark — optimistic; ' +
+              'see held-out above for the comparable number.">training best</span>' +
             '<span class="val score">' + fmtScore(r.active.best_reward) + '</span>' +
             deltaSpan +
           '</div>';
       } else if (lastHasBits) {
         const deltaSpan = fmtDeltaSpan(lastRun.delta, 'vs baseline');
-        const labelText = lastRun.status === 'completed' ? 'best' : 'best (stopped)';
+        const labelText = lastRun.status === 'completed' ? 'training best' : 'training best (stopped)';
         scoreRow =
           '<div class="exp-row">' +
-            '<span class="label">' + labelText + '</span>' +
+            '<span class="label" title="Training high-water-mark — optimistic; ' +
+              'see held-out above for the comparable number.">' + labelText + '</span>' +
             '<span class="val score">' + fmtScore(lastRun.best_reward) + '</span>' +
             deltaSpan +
           '</div>';
       } else if (r.best_reward !== null && r.best_reward !== undefined) {
         scoreRow =
           '<div class="exp-row">' +
-            '<span class="label">best so far</span>' +
+            '<span class="label" title="Training high-water-mark — optimistic; ' +
+              'see held-out above for the comparable number.">training best</span>' +
             '<span class="val score">' + fmtScore(r.best_reward) + '</span>' +
           '</div>';
-      } else {
+      } else if (!valRow) {
         scoreRow =
           '<div class="exp-row">' +
             '<span class="label">score</span>' +
@@ -1424,6 +1461,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
             '<div class="exp-state ' + stateLabel + '">' + stateLabel + '</div>' +
           '</div>' +
           stalledNote +
+          valRow +
           scoreRow +
           historicalLine +
           latestLine +

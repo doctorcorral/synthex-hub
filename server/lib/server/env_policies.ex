@@ -235,6 +235,36 @@ defmodule Server.EnvPolicies do
     end)
   end
 
+  @doc """
+  Record the lineage's held-out validation average. Called by the
+  controller at the end of each CEGAR step with the per-episode mean on
+  the fixed validation seed block and the `policy_version` it was
+  measured at. This is the canonical, cross-run-comparable performance
+  metric (vs the training-block high-water-mark `best_reward`).
+
+  Best-effort: a failure here must never derail the step. Stamped
+  outside the commit transaction since it reflects the whole step's net
+  policy, not a single bit commit.
+  """
+  @spec record_validation(EnvPolicy.t(), float(), non_neg_integer(), map() | nil) :: :ok
+  def record_validation(env_policy, val_avg, version, tail \\ nil)
+
+  def record_validation(%EnvPolicy{} = env_policy, val_avg, version, tail)
+      when is_number(val_avg) and is_integer(version) do
+    changes = %{validation_avg: val_avg * 1.0, validation_version: version}
+    changes = if is_map(tail), do: Map.put(changes, :validation_tail, tail), else: changes
+
+    env_policy
+    |> Ecto.Changeset.change(changes)
+    |> Repo.update()
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def record_validation(_, _, _, _), do: :ok
+
   @doc "List env_policies for an env_name, newest-committed-first."
   def list_for_env(env_name) do
     from(p in EnvPolicy,

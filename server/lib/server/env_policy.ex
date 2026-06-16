@@ -83,10 +83,15 @@ defmodule Server.EnvPolicy do
     # experiment row.
     field :policy_version, :integer, default: 0
 
-    # `best_reward` is the reward of the current predicates under the
-    # validation seed set, in the same sum-domain units the rest of
-    # the system uses (per-seed sum across `n_episodes`). Divide by
-    # `n_episodes` for per-episode mean display.
+    # `best_reward` is a TRAINING-block high-water-mark: the reward of
+    # the last committed candidate measured on that round's per-round
+    # *scoring* seed block (sum-domain, per-seed sum across
+    # `n_episodes`), set by `Server.CommitGate`. It is max-selected over
+    # thousands of noisy candidates on a small, run-specific seed block,
+    # so it is NOT comparable across runs/lineages and overstates true
+    # performance. For an honest, comparable number use `validation_avg`
+    # below. Divide `best_reward` by `n_episodes` for its per-episode
+    # mean.
     #
     # `baseline_reward` is the reward of the empty (`falsep`)
     # predicates from the first-ever experiment in this lineage —
@@ -96,6 +101,28 @@ defmodule Server.EnvPolicy do
     # rather than per-session progress.
     field :best_reward, :float
     field :baseline_reward, :float
+
+    # `validation_avg` is the canonical performance metric for the
+    # lineage: the PER-EPISODE mean of the current predicates on the
+    # FIXED held-out validation seed block (`Mujoco.validation_seeds/0`),
+    # written by the controller at the end of each CEGAR step (after the
+    # validation guard's keep/revert decision). Unlike `best_reward` it
+    # is measured on the same seeds every time, so it's directly
+    # comparable across steps, runs, and lineages — it's what the
+    # dashboard should headline. `validation_version` records the
+    # `policy_version` it was measured at, so a stale value (older than
+    # `policy_version`) is detectable.
+    field :validation_avg, :float
+    field :validation_version, :integer
+
+    # Tail/robustness stats of the held-out block (see migration
+    # `AddEnvPolicyValidationTail`): `%{"cvar10", "worst", "p10",
+    # "mean", "n"}`. Mean (`validation_avg`) is average-case; this
+    # surfaces the worst end of the per-seed return distribution, where
+    # a coverage-/robustness-oriented method's value (or a brittle
+    # policy's damage) actually shows up. Nil when the worker can't emit
+    # per-seed returns.
+    field :validation_tail, :map
 
     # The n_episodes the rewards above were measured under. Used by
     # the API to convert sum-domain rewards to per-episode means.
@@ -118,6 +145,7 @@ defmodule Server.EnvPolicy do
 
   @castable ~w(env_name env_key config_sig config_data
                predicates policy_version best_reward baseline_reward
+               validation_avg validation_version validation_tail
                n_episodes first_seen_at last_committed_by_experiment_id)a
 
   def changeset(env_policy, attrs) do
