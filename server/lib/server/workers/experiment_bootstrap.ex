@@ -308,6 +308,7 @@ defmodule Server.Workers.ExperimentBootstrap do
       top_k: get_int(config, "top_k", 20),
       max_iters: get_int(config, "max_iters", 5),
       cegar_rounds: get_int(config, "cegar_rounds", 3),
+      max_candidates: get_int(config, "max_candidates", 8000),
       max_steps: get_int(config, "max_steps", 1000),
       feature_types: feature_types(Map.get(config, "feature_types")),
       verifier: verifier(Map.get(config, "verifier")),
