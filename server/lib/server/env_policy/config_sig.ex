@@ -76,7 +76,14 @@ defmodule Server.EnvPolicy.ConfigSig do
     # each other's commits. Forked in `stable_encode/1` in a
     # backward-compatible way: the default (`random`) is omitted from the
     # digest, so every pre-existing signature is unchanged.
-    "verifier" => "random"
+    "verifier" => "random",
+    # Replicate index. NOT a policy-shape field — it only shifts the
+    # training-seed draw — but two replicates must be INDEPENDENT
+    # lineages (they must not inherit each other's commits) or a sweep
+    # collapses to one shared policy. Forked backward-compatibly in
+    # `stable_encode/1`: the default (0) is omitted from the digest so
+    # every pre-existing signature is byte-identical.
+    "run_seed" => 0
   }
 
   @feature_canonical %{
@@ -114,7 +121,13 @@ defmodule Server.EnvPolicy.ConfigSig do
       |> Map.new()
 
     verifier_raw = Map.get(config, "verifier", Map.get(config, :verifier, @defaults["verifier"]))
-    Map.put(base, "verifier", canonical_verifier(verifier_raw))
+
+    run_seed_raw =
+      Map.get(config, "run_seed", Map.get(config, :run_seed, @defaults["run_seed"]))
+
+    base
+    |> Map.put("verifier", canonical_verifier(verifier_raw))
+    |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -172,10 +185,23 @@ defmodule Server.EnvPolicy.ConfigSig do
     # verifier (e.g. `ga_qd`) is appended, forking it into its own
     # lineage so an adversarial run starts from baseline rather than
     # inheriting a random-trained policy.
-    case Map.get(map, "verifier", "random") do
-      v when v in [nil, "random"] -> "{" <> body <> "}"
-      v -> "{" <> body <> ",\"verifier\":" <> Jason.encode!(v) <> "}"
-    end
+    verifier_suffix =
+      case Map.get(map, "verifier", "random") do
+        v when v in [nil, "random"] -> ""
+        v -> ",\"verifier\":" <> Jason.encode!(v)
+      end
+
+    # Same backward-compatible fork as the verifier: run_seed 0 (the
+    # default) contributes nothing to the digest, so existing signatures
+    # are unchanged; a non-zero run_seed appends and forks a fresh
+    # replicate lineage.
+    run_seed_suffix =
+      case Map.get(map, "run_seed", 0) do
+        s when s in [nil, 0] -> ""
+        s -> ",\"run_seed\":" <> Jason.encode!(s)
+      end
+
+    "{" <> body <> verifier_suffix <> run_seed_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -218,6 +244,18 @@ defmodule Server.EnvPolicy.ConfigSig do
   defp canonical_verifier(v) when v in ["ga_qd", :ga_qd], do: "ga_qd"
   defp canonical_verifier(_), do: "random"
 
+  defp canonical_run_seed(n) when is_integer(n) and n >= 0, do: n
+  defp canonical_run_seed(n) when is_float(n) and n >= 0, do: trunc(n)
+
+  defp canonical_run_seed(n) when is_binary(n) do
+    case Integer.parse(n) do
+      {i, _} when i >= 0 -> i
+      _ -> 0
+    end
+  end
+
+  defp canonical_run_seed(_), do: 0
+
   @doc """
   Short human label for surfacing on the dashboard. e.g.
   `"b=3 · d=1 · f=axis,diag,prod"`. Reads the canonical form so the
@@ -231,6 +269,7 @@ defmodule Server.EnvPolicy.ConfigSig do
     max_coeff = Map.get(canonical, "max_coeff")
     tridiag = Map.get(canonical, "tridiag_dims")
     verifier = Map.get(canonical, "verifier")
+    run_seed = Map.get(canonical, "run_seed", 0)
 
     parts = [
       bits && "b=#{bits}",
@@ -238,6 +277,7 @@ defmodule Server.EnvPolicy.ConfigSig do
       feats && "f=#{Enum.join(feats, ",")}",
       max_coeff && max_coeff != @defaults["max_coeff"] && "c=#{max_coeff}",
       tridiag && "t=#{Enum.join(tridiag, ":")}",
+      run_seed && run_seed != 0 && "r#{run_seed}",
       # Surface the counterexample strategy on the card. The default
       # (`random`) is omitted so existing cards are unchanged — its
       # absence means standard CEGAR; presence of a verifier badge means

@@ -312,7 +312,8 @@ defmodule Server.Workers.ExperimentBootstrap do
       max_steps: get_int(config, "max_steps", 1000),
       feature_types: feature_types(Map.get(config, "feature_types")),
       verifier: verifier(Map.get(config, "verifier")),
-      verifier_opts: verifier_opts(Map.get(config, "verifier_opts"))
+      verifier_opts: verifier_opts(Map.get(config, "verifier_opts")),
+      run_seed: get_int(config, "run_seed", 0)
     ]
   end
 
