@@ -230,7 +230,15 @@ defmodule Server.Queue do
         # and released before we build the next group. That keeps
         # the pool available for sibling parallel-bit submits and
         # for worker `complete_chunk` reports.
-        _ = Oban.insert_all(changesets)
+        #
+        # Explicit 60s timeout (vs DBConnection's 15s default): under
+        # heavy step-2+ contention (large collect_states writes + worker
+        # chunk completions + sibling submits all hitting one small
+        # Postgres) a 500-row insert can momentarily exceed 15s and get
+        # cancelled (57014 query_canceled), which crashes the whole bit
+        # and forces a wasteful full re-dispatch. Waiting out the
+        # contention is cheaper than crash-retrying into the same load.
+        _ = Oban.insert_all(changesets, timeout: 60_000)
       end)
 
       :ok
@@ -249,9 +257,17 @@ defmodule Server.Queue do
   # Count of claimable chunk jobs across all batches. Indexed by
   # Oban's `(state, queue)` composite, so this is a cheap counting
   # scan even with a large backlog.
+  #
+  # Best-effort: backpressure is an optimization, never a correctness
+  # gate. If the count itself is slow/cancelled under DB contention
+  # (e.g. statement_timeout), we must NOT let it fail the submit — we
+  # return 0 ("no backlog, proceed") so a struggling DB doesn't get a
+  # second failure mode bolted on. Short timeout so it can't hang.
   defp available_backlog do
     from(j in Oban.Job, where: j.state == "available" and j.queue == "chunks")
-    |> Repo.aggregate(:count, :id)
+    |> Repo.aggregate(:count, :id, timeout: 5_000)
+  rescue
+    _ -> 0
   end
 
   defp backlog_cfg(key, default) do
@@ -370,7 +386,12 @@ defmodule Server.Queue do
           items: fragment("? -> ?", j.args, ^"results")
         }
       )
-      |> Repo.all()
+      # Large result fetches (a 10^4-chunk batch drags back every
+      # chunk's `args.results` jsonb in one query) can exceed the 15s
+      # DBConnection default under load and get cancelled (57014 /
+      # "ssl recv: closed"). Give the read room to complete rather than
+      # crash the controller mid result-collection.
+      |> Repo.all(timeout: 60_000)
 
     chunks =
       Enum.map(rows, fn row ->
