@@ -83,7 +83,15 @@ defmodule Server.EnvPolicy.ConfigSig do
     # collapses to one shared policy. Forked backward-compatibly in
     # `stable_encode/1`: the default (0) is omitted from the digest so
     # every pre-existing signature is byte-identical.
-    "run_seed" => 0
+    "run_seed" => 0,
+    # Per-bit candidate proposer. NOT a policy-shape field — it doesn't
+    # change what a predicate is — but it changes HOW candidates are
+    # found, so a GA-searched policy and an enumerate-searched one are
+    # different experiments that must NOT inherit each other's commits.
+    # Forked backward-compatibly in `stable_encode/1`: the default
+    # (`enumerate`) is omitted from the digest so every pre-existing
+    # signature is byte-identical.
+    "proposer" => "enumerate"
   }
 
   @feature_canonical %{
@@ -125,9 +133,13 @@ defmodule Server.EnvPolicy.ConfigSig do
     run_seed_raw =
       Map.get(config, "run_seed", Map.get(config, :run_seed, @defaults["run_seed"]))
 
+    proposer_raw =
+      Map.get(config, "proposer", Map.get(config, :proposer, @defaults["proposer"]))
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
+    |> Map.put("proposer", canonical_proposer(proposer_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -201,7 +213,17 @@ defmodule Server.EnvPolicy.ConfigSig do
         s -> ",\"run_seed\":" <> Jason.encode!(s)
       end
 
-    "{" <> body <> verifier_suffix <> run_seed_suffix <> "}"
+    # Same backward-compatible fork as verifier/run_seed: the default
+    # proposer (`enumerate`) contributes nothing, so pre-existing
+    # signatures are byte-identical; `ga` appends and forks a fresh
+    # lineage so a genetic-search policy never inherits enumerate commits.
+    proposer_suffix =
+      case Map.get(map, "proposer", "enumerate") do
+        p when p in [nil, "enumerate"] -> ""
+        p -> ",\"proposer\":" <> Jason.encode!(p)
+      end
+
+    "{" <> body <> verifier_suffix <> run_seed_suffix <> proposer_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -256,6 +278,9 @@ defmodule Server.EnvPolicy.ConfigSig do
 
   defp canonical_run_seed(_), do: 0
 
+  defp canonical_proposer(p) when p in ["ga", :ga], do: "ga"
+  defp canonical_proposer(_), do: "enumerate"
+
   @doc """
   Short human label for surfacing on the dashboard. e.g.
   `"b=3 · d=1 · f=axis,diag,prod"`. Reads the canonical form so the
@@ -270,6 +295,7 @@ defmodule Server.EnvPolicy.ConfigSig do
     tridiag = Map.get(canonical, "tridiag_dims")
     verifier = Map.get(canonical, "verifier")
     run_seed = Map.get(canonical, "run_seed", 0)
+    proposer = Map.get(canonical, "proposer", "enumerate")
 
     parts = [
       bits && "b=#{bits}",
@@ -282,7 +308,10 @@ defmodule Server.EnvPolicy.ConfigSig do
       # (`random`) is omitted so existing cards are unchanged — its
       # absence means standard CEGAR; presence of a verifier badge means
       # an adversarial source is driving the search.
-      verifier && verifier != @defaults["verifier"] && verifier_badge(verifier)
+      verifier && verifier != @defaults["verifier"] && verifier_badge(verifier),
+      # Surface the proposer (default `enumerate` omitted): a "GA" badge
+      # means the genetic composition search drove candidate generation.
+      proposer && proposer != @defaults["proposer"] && proposer_badge(proposer)
     ]
 
     parts
@@ -292,6 +321,9 @@ defmodule Server.EnvPolicy.ConfigSig do
 
   defp verifier_badge("ga_qd"), do: "GAQD"
   defp verifier_badge(v), do: "verifier=#{v}"
+
+  defp proposer_badge("ga"), do: "GA"
+  defp proposer_badge(p), do: "proposer=#{p}"
 
   @doc "Fields whose change forks a new policy lineage. Exposed for tests."
   def policy_shape_keys, do: @policy_shape_keys

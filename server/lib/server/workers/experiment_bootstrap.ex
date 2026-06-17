@@ -313,9 +313,22 @@ defmodule Server.Workers.ExperimentBootstrap do
       feature_types: feature_types(Map.get(config, "feature_types")),
       verifier: verifier(Map.get(config, "verifier")),
       verifier_opts: verifier_opts(Map.get(config, "verifier_opts")),
+      proposer: proposer(Map.get(config, "proposer")),
+      proposer_opts: proposer_opts(Map.get(config, "proposer_opts")),
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
+
+  # Per-bit candidate proposer. Defaults to `:enumerate` (historical
+  # enumerate-then-subsample search); `:ga` opts into the genetic
+  # composition-space search (`Synthex.Gym.GaProposer`). Unknown values
+  # fall back to `:enumerate` so a typo can never wedge an experiment.
+  defp proposer("ga"), do: :ga
+  defp proposer(:ga), do: :ga
+  defp proposer(_), do: :enumerate
+
+  defp proposer_opts(opts) when is_map(opts), do: opts
+  defp proposer_opts(_), do: %{}
 
   # Counterexample-source strategy for each CEGAR step. Defaults to
   # `:random` (historical passive behaviour); `:ga_qd` opts into the
