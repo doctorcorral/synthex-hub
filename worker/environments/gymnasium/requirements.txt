@@ -1,2 +1,4 @@
 numpy>=1.24.0
-gymnasium[mujoco]>=0.29.0
+# box2d extra adds LunarLander / BipedalWalker (and their continuous /
+# hardcore variants); mujoco extra keeps the existing locomotion suite.
+gymnasium[mujoco,box2d]>=0.29.0
