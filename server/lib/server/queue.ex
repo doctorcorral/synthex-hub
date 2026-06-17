@@ -962,6 +962,35 @@ defmodule Server.Queue do
 
   def worker_capabilities(_), do: ["mujoco"]
 
+  @doc """
+  Is there at least one *live* worker that can run `adapter`?
+
+  "Live" = `status == "active"` and a heartbeat within
+  `:worker_heartbeat_timeout_secs` (default 120 s, same window
+  `ReapWorkers` uses to mark a worker inactive). Used by the scorer's
+  poll loop to distinguish a genuine stall (workers present, no
+  progress) from a *paused* experiment (no worker can claim this
+  adapter's chunks — e.g. a `mujoco_warp` run while the GPU box is
+  offline). A paused experiment must wait, not fail: its chunks stay
+  `available` and a returning capable worker resumes it automatically.
+
+  Unknown/blank adapter → `true` (never pause on a missing tag).
+  """
+  @spec adapter_has_live_worker?(String.t() | nil) :: boolean()
+  def adapter_has_live_worker?(adapter) when is_binary(adapter) and adapter != "" do
+    timeout = Application.get_env(:server, :worker_heartbeat_timeout_secs, 120)
+    cutoff = DateTime.add(DateTime.utc_now(), -timeout, :second)
+
+    from(w in WorkerNode,
+      where: w.status == "active",
+      where: w.last_heartbeat_at >= ^cutoff,
+      where: fragment("? = ANY(?)", ^adapter, w.capabilities)
+    )
+    |> Repo.exists?()
+  end
+
+  def adapter_has_live_worker?(_), do: true
+
   def heartbeat(worker_id) do
     from(w in WorkerNode, where: w.id == ^worker_id)
     |> Repo.update_all(set: [last_heartbeat_at: DateTime.utc_now(), status: "active"])

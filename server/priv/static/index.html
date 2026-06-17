@@ -475,6 +475,7 @@
       font-weight: 600;
     }
     .exp-state.slow,
+    .exp-state.paused,
     .exp-state.stopped {
       color: var(--warn);
       border-color: var(--warn);
@@ -505,6 +506,7 @@
                                   var(--bg-elev));
     }
     .exp.slow,
+    .exp.paused,
     .exp.stopped {
       border-color: var(--warn);
       background: linear-gradient(180deg,
@@ -1000,7 +1002,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         if (r.active) {
           const h = r.active.health;
           if (h === 'stalled' || h === 'idle') return 0;
-          if (h === 'slow') return 1;
+          if (h === 'slow' || h === 'paused') return 1;
           return 2;
         }
         const lr = r.last_run;
@@ -1088,11 +1090,12 @@ mix run experiments/humanoid/round-1.exs</code></pre>
         lastRun && lastHasBits                    ? 'stopped'   :
         'idle';
       const isBad  = health === 'stalled' || health === 'idle';
-      const isWarn = health === 'slow' ||
+      const isWarn = health === 'slow' || health === 'paused' ||
                      (!isLive && lastRun && lastRun.status !== 'completed' && lastHasBits);
       const stateLabel =
         health === 'stalled' ? 'stalled' :
         health === 'idle'    ? 'idle'    :
+        health === 'paused'  ? 'paused'  :
         health === 'slow'    ? 'slow'    :
         isLive               ? 'live'    : restLabel;
 

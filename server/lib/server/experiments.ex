@@ -225,6 +225,26 @@ defmodule Server.Experiments do
     |> Repo.update()
   end
 
+  @doc """
+  Bump an experiment's `updated_at` without changing any state. Used
+  as a paused-experiment heartbeat by the scorer's poll loop: while a
+  run waits for a capable worker to (re)appear, this keeps the
+  controller-liveness clock fresh so `OrphanReaper` and the dashboard
+  treat it as alive-and-waiting rather than a crashed/stalled master.
+  Cheap: a single indexed UPDATE, no struct load.
+  """
+  @spec touch(String.t()) :: :ok
+  def touch(experiment_id) when is_binary(experiment_id) do
+    from(e in Experiment, where: e.id == ^experiment_id)
+    |> Repo.update_all(set: [updated_at: DateTime.utc_now()])
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def touch(_), do: :ok
+
   @doc "Transition an experiment to completed."
   def mark_completed(%Experiment{} = exp) do
     update_state(exp, %{
@@ -573,7 +593,12 @@ defmodule Server.Experiments do
           "stalled"
 
         elapsed > @boot_grace_seconds and chunks_stuck?(flow) ->
-          "idle"
+          # Distinguish a paused run (no live worker can claim this
+          # adapter's chunks — e.g. a mujoco_warp run while the GPU box
+          # is offline; it will resume on its own when one rejoins)
+          # from a genuine idle swarm (capable workers present but not
+          # pulling). Paused is expected, not an incident.
+          if paused_for_missing_worker?(exp), do: "paused", else: "idle"
 
         (exp.accepted_count || 0) == 0 and elapsed > @slow_after_seconds and chunks_flowing?(flow) ->
           "slow"
@@ -586,6 +611,22 @@ defmodule Server.Experiments do
   end
 
   defp compute_health(_exp, _flow), do: {"unknown", nil}
+
+  # True when the experiment's physics adapter has no live worker, so
+  # its queued chunks can't be claimed and the run is waiting (paused),
+  # not failing. Only consulted for an already-stuck running experiment,
+  # so this is a bounded, rare workers-table check.
+  defp paused_for_missing_worker?(%Experiment{config: config}) do
+    adapter =
+      case is_map(config) && (Map.get(config, "adapter") || Map.get(config, :adapter)) do
+        a when is_binary(a) and a != "" -> a
+        _ -> "mujoco"
+      end
+
+    not Server.Queue.adapter_has_live_worker?(adapter)
+  rescue
+    _ -> false
+  end
 
   defp chunks_flowing?(nil), do: false
 

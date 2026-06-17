@@ -314,6 +314,22 @@ defmodule Server.LocalScorer do
 
   # ── Await + poll ────────────────────────────────────────────
 
+  # After this much apparent no-progress we start asking whether the
+  # batch's adapter even has a live worker. Short enough to surface a
+  # pause quickly, long enough to avoid querying the workers table on
+  # every healthy poll.
+  @pause_grace_ms 30_000
+
+  # While paused (no capable worker online) we refresh the experiment's
+  # liveness heartbeat at most this often, so a returning worker and the
+  # dashboard both see the run as alive-and-waiting, not dead.
+  @pause_heartbeat_ms 30_000
+
+  # Poll cadence while paused. Slower than the active poll interval so a
+  # multi-hour GPU outage doesn't probe the workers table every 500 ms;
+  # 5 s is still responsive enough to resume promptly when one rejoins.
+  @paused_poll_interval_ms 5_000
+
   defp await_batch_items(batch_id, state) do
     now = System.monotonic_time(:millisecond)
 
@@ -325,7 +341,15 @@ defmodule Server.LocalScorer do
       last_completed: -1,
       poll_interval_ms: state.poll_interval_ms,
       stall_timeout_ms: state.stall_timeout_ms,
-      last_logged_progress: -1.0
+      last_logged_progress: -1.0,
+      # Pause bookkeeping. `adapter`/`experiment_id` drive the
+      # "is there a worker that can run this?" check; `paused_since`
+      # gates the resume log; `last_pause_heartbeat` throttles the
+      # liveness touch.
+      adapter: state.adapter,
+      experiment_id: state.experiment_id,
+      paused_since: nil,
+      last_pause_heartbeat: 0
     }
 
     poll_loop(batch_id, s)
@@ -333,12 +357,30 @@ defmodule Server.LocalScorer do
 
   defp poll_loop(batch_id, s) do
     now = System.monotonic_time(:millisecond)
+    no_progress_ms = now - s.last_progress_at
 
     cond do
       now > s.hard_deadline ->
         {:error, "batch #{batch_id} exceeded hard wall-clock deadline"}
 
-      now - s.last_progress_at > s.stall_timeout_ms ->
+      # PAUSED, not stalled: progress has been idle past the grace
+      # window AND no live worker advertises this batch's adapter (e.g.
+      # a mujoco_warp run while the GPU box is offline). Don't burn the
+      # stall clock — freeze it, keep a liveness heartbeat, and wait.
+      # The chunks stay `available`; when a capable worker rejoins it
+      # claims them and progress resumes on its own.
+      no_progress_ms > @pause_grace_ms and not Queue.adapter_has_live_worker?(s.adapter) ->
+        s2 = note_paused(s, batch_id, now)
+        Process.sleep(max(s.poll_interval_ms, @paused_poll_interval_ms))
+        # Park the stall clock just past the grace boundary: the next
+        # iteration still re-checks worker liveness (stays "paused"),
+        # but the elapsed-no-progress can never crawl toward
+        # stall_timeout while we wait. When a capable worker rejoins,
+        # this branch stops matching and the parked clock leaves a full
+        # stall window for real chunk completion.
+        poll_loop(batch_id, %{s2 | last_progress_at: now - @pause_grace_ms - 1})
+
+      no_progress_ms > s.stall_timeout_ms ->
         {:error,
          "batch #{batch_id} stalled (no chunk progress in " <>
            "#{div(s.stall_timeout_ms, 1000)}s)"}
@@ -360,12 +402,56 @@ defmodule Server.LocalScorer do
                 {:error, "batch #{batch_id} cancelled"}
 
               _ ->
-                s2 = maybe_advance_progress_clock(s, progress, now, batch_id)
+                s2 = s |> maybe_log_resume(batch_id) |> maybe_advance_progress_clock(progress, now, batch_id)
                 Process.sleep(s.poll_interval_ms)
                 poll_loop(batch_id, s2)
             end
         end
     end
+  end
+
+  # Heartbeat + log a paused experiment. Throttled to @pause_heartbeat_ms
+  # so a long GPU outage doesn't spam the event log or the DB.
+  defp note_paused(s, batch_id, now) do
+    if now - s.last_pause_heartbeat >= @pause_heartbeat_ms do
+      if is_nil(s.paused_since) do
+        Logger.warning(
+          "[LocalScorer] batch #{batch_id} PAUSED: no live '#{s.adapter}' worker; " <>
+            "holding (chunks remain queued, will resume when one rejoins)"
+        )
+
+        log_pause_event(s, batch_id)
+      end
+
+      Server.Experiments.touch(s.experiment_id)
+
+      %{s | paused_since: s.paused_since || now, last_pause_heartbeat: now}
+    else
+      %{s | paused_since: s.paused_since || now}
+    end
+  end
+
+  # Emit a one-shot incident when a run first pauses so it shows on the
+  # dashboard's event feed. Best-effort — never let logging break the loop.
+  defp log_pause_event(%{experiment_id: id} = s, _batch_id) when is_binary(id) do
+    Server.Experiments.log_event!(
+      "warn",
+      "master",
+      "experiment paused: waiting for a '#{s.adapter}' worker to come online",
+      experiment_id: id,
+      metadata: %{"adapter" => s.adapter}
+    )
+  rescue
+    _ -> :ok
+  end
+
+  defp log_pause_event(_s, _batch_id), do: :ok
+
+  defp maybe_log_resume(%{paused_since: nil} = s, _batch_id), do: s
+
+  defp maybe_log_resume(s, batch_id) do
+    Logger.info("[LocalScorer] batch #{batch_id} RESUMED: a '#{s.adapter}' worker is back online")
+    %{s | paused_since: nil, last_pause_heartbeat: 0}
   end
 
   defp maybe_advance_progress_clock(s, progress, now, batch_id) do
