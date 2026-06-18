@@ -1,0 +1,25 @@
+{
+  "env_name": "InvertedDoublePendulum-v5",
+  "source_policy_env": "InvertedDoublePendulum-warp-v5",
+  "env_policy_id": "d69b2b30-68a9-4b92-a347-382d8bf84bb9",
+  "policy_version": 15,
+  "seed": 4,
+  "reward": 379.69061193646326,
+  "steps": 42,
+  "terminated": true,
+  "truncated": false,
+  "frames": 63,
+  "fps": 10,
+  "width": 1280,
+  "height": 720,
+  "camera": {
+    "distance": 3.2,
+    "elevation": -18.0,
+    "azimuth": 90.0,
+    "lookat": [
+      0.0,
+      0.0,
+      0.9
+    ]
+  }
+}
