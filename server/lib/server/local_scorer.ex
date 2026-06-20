@@ -187,14 +187,60 @@ defmodule Server.LocalScorer do
           case await_batch_items(batch.id, state) do
             {:ok, items} ->
               states = Enum.flat_map(items, fn item -> Map.get(item, "states", []) end)
+              snapshots = Enum.flat_map(items, fn item -> Map.get(item, "snapshots", []) end)
               n_landings = Enum.count(items, fn item -> Map.get(item, "success", false) end)
 
               {:ok,
                %{
                  "states" => states,
+                 "snapshots" => snapshots,
                  "n_landings" => n_landings,
                  "n_episodes" => length(items)
                }}
+
+            {:error, _} = err ->
+              err
+          end
+
+        {:error, reason} ->
+          {:error, "submit_batch failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp dispatch(%{"cmd" => "successor_advantages"} = request, state) do
+    snapshots = request["snapshots"] || []
+
+    if snapshots == [] do
+      {:error, "successor_advantages: payload[\"snapshots\"] must be non-empty"}
+    else
+      batch_name = "#{state.batch_prefix}-succ-adv#{request["target_bit"]}"
+
+      payload =
+        request
+        |> Map.put("name", batch_name)
+        |> Map.put("cmd", "successor_advantages")
+        |> Map.put("chunk_size", state.collect_chunk_size)
+        |> Map.put("candidates", snapshots)
+        |> Map.delete("snapshots")
+        |> Map.put("adapter", state.adapter)
+        |> maybe_put_experiment_id(state.experiment_id)
+
+      case Queue.submit_batch(payload, submitter: state.submitter) do
+        {:ok, batch} ->
+          Logger.info(
+            "[LocalScorer] successor_advantages batch #{batch.id}: " <>
+              "#{batch.total_chunks} chunks, #{length(snapshots)} snapshots, " <>
+              "bit=#{request["target_bit"]}"
+          )
+
+          case await_batch_items(batch.id, state) do
+            {:ok, items} ->
+              advantages =
+                items
+                |> Enum.map(fn item -> Map.get(item, "advantage", 0.0) end)
+
+              {:ok, %{"advantages" => advantages}}
 
             {:error, _} = err ->
               err

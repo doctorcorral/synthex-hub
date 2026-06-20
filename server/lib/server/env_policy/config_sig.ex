@@ -91,7 +91,12 @@ defmodule Server.EnvPolicy.ConfigSig do
     # Forked backward-compatibly in `stable_encode/1`: the default
     # (`enumerate`) is omitted from the digest so every pre-existing
     # signature is byte-identical.
-    "proposer" => "enumerate"
+    "proposer" => "enumerate",
+    # Per-bit candidate fitness / ranking objective. NOT a policy-shape
+    # field — the predicate form is unchanged — but successor-ranked and
+    # episode-ranked policies are different experiments. Forked backward-
+    # compatibly in `stable_encode/1`: the default (`episode`) is omitted.
+    "scorer" => "episode"
   }
 
   @feature_canonical %{
@@ -136,10 +141,14 @@ defmodule Server.EnvPolicy.ConfigSig do
     proposer_raw =
       Map.get(config, "proposer", Map.get(config, :proposer, @defaults["proposer"]))
 
+    scorer_raw =
+      Map.get(config, "scorer", Map.get(config, :scorer, @defaults["scorer"]))
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
     |> Map.put("proposer", canonical_proposer(proposer_raw))
+    |> Map.put("scorer", canonical_scorer(scorer_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -223,7 +232,13 @@ defmodule Server.EnvPolicy.ConfigSig do
         p -> ",\"proposer\":" <> Jason.encode!(p)
       end
 
-    "{" <> body <> verifier_suffix <> run_seed_suffix <> proposer_suffix <> "}"
+    scorer_suffix =
+      case Map.get(map, "scorer", "episode") do
+        s when s in [nil, "episode"] -> ""
+        s -> ",\"scorer\":" <> Jason.encode!(s)
+      end
+
+    "{" <> body <> verifier_suffix <> run_seed_suffix <> proposer_suffix <> scorer_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -281,6 +296,9 @@ defmodule Server.EnvPolicy.ConfigSig do
   defp canonical_proposer(p) when p in ["ga", :ga], do: "ga"
   defp canonical_proposer(_), do: "enumerate"
 
+  defp canonical_scorer(s) when s in ["successor", :successor], do: "successor"
+  defp canonical_scorer(_), do: "episode"
+
   @doc """
   Short human label for surfacing on the dashboard. e.g.
   `"b=3 · d=1 · f=axis,diag,prod"`. Reads the canonical form so the
@@ -296,6 +314,7 @@ defmodule Server.EnvPolicy.ConfigSig do
     verifier = Map.get(canonical, "verifier")
     run_seed = Map.get(canonical, "run_seed", 0)
     proposer = Map.get(canonical, "proposer", "enumerate")
+    scorer = Map.get(canonical, "scorer", "episode")
 
     parts = [
       bits && "b=#{bits}",
@@ -311,7 +330,8 @@ defmodule Server.EnvPolicy.ConfigSig do
       verifier && verifier != @defaults["verifier"] && verifier_badge(verifier),
       # Surface the proposer (default `enumerate` omitted): a "GA" badge
       # means the genetic composition search drove candidate generation.
-      proposer && proposer != @defaults["proposer"] && proposer_badge(proposer)
+      proposer && proposer != @defaults["proposer"] && proposer_badge(proposer),
+      scorer && scorer != @defaults["scorer"] && scorer_badge(scorer)
     ]
 
     parts
@@ -324,6 +344,9 @@ defmodule Server.EnvPolicy.ConfigSig do
 
   defp proposer_badge("ga"), do: "GA"
   defp proposer_badge(p), do: "proposer=#{p}"
+
+  defp scorer_badge("successor"), do: "SUCC"
+  defp scorer_badge(s), do: "scorer=#{s}"
 
   @doc "Fields whose change forks a new policy lineage. Exposed for tests."
   def policy_shape_keys, do: @policy_shape_keys

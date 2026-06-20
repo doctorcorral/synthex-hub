@@ -227,8 +227,16 @@ defmodule Server.Workers.ExperimentController do
     # historical on-policy collect_states + seeds_for pair exactly;
     # `:ga_qd` swaps in the adversarial QD verifier. Everything
     # downstream (features, optimize_bit, commit-gate) is unchanged.
-    %{states: states, seeds: seeds, counterexamples: cxs} =
-      Synthex.Verifier.supply(preds_at_start, ctx, cegar_iter)
+    supply = Synthex.Verifier.supply(preds_at_start, ctx, cegar_iter)
+    states = supply.states
+    seeds = supply.seeds
+    cxs = supply.counterexamples
+
+    ctx =
+      case Map.get(supply, :succ_snapshots) do
+        snaps when is_list(snaps) and snaps != [] -> Map.put(ctx, :succ_snapshots, snaps)
+        _ -> ctx
+      end
 
     features = Mujoco.build_features(states, ctx)
 

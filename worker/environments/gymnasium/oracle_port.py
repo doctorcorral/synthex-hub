@@ -248,22 +248,37 @@ def handle_score_bit(job):
 # pool.
 
 
-def collect_states_one(env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride):
+def collect_states_one(env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride,
+                       want_sim_state=False):
     """
     Roll out one episode; record at most `max_steps // stride` evenly
     spaced states. The master only needs a representative sample for
     feature generation — sending every timestep would push 1-2 MB per
     seed through the hub for nothing.
+
+    When `want_sim_state` is true, also capture MuJoCo qpos/qvel at
+    each sampled step so the successor scorer can branch counterfactually
+    via set_state. Box2D envs cannot be cloned; the worker omits qpos/
+    qvel in that case and the master must not enable successor fitness.
     """
     env_kwargs = cfg.get("env_kwargs", {})
     env = gym.make(env_name, **env_kwargs)
+    snapshots = []
     try:
         obs, _ = env.reset(seed=int(seed))
         states = []
         ep_r = 0.0
         for step in range(max_steps):
             if step % stride == 0:
-                states.append(obs.tolist())
+                obs_list = obs.tolist()
+                states.append(obs_list)
+                if want_sim_state:
+                    snap = {"obs": obs_list}
+                    u = env.unwrapped
+                    if hasattr(u, "set_state") and hasattr(getattr(u, "data", None), "qpos"):
+                        snap["qpos"] = u.data.qpos.copy().tolist()
+                        snap["qvel"] = u.data.qvel.copy().tolist()
+                        snapshots.append(snap)
             action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
             obs, r, term, trunc, _ = env.step(action)
             ep_r += float(r)
@@ -272,12 +287,15 @@ def collect_states_one(env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, 
     finally:
         env.close()
 
-    return {
+    out = {
         "seed": int(seed),
         "states": states,
         "reward": ep_r,
         "success": ep_r > cfg["success_threshold"],
     }
+    if want_sim_state:
+        out["snapshots"] = snapshots
+    return out
 
 
 def handle_collect_states(job):
@@ -294,12 +312,14 @@ def handle_collect_states(job):
     # the JSON payload that crosses the hub by 10×. Master can request
     # a different stride via the param.
     stride = max(1, int(job.get("state_stride", 10)))
+    want_sim_state = bool(job.get("want_sim_state", False))
 
     results = []
     for i, seed in enumerate(seeds):
         try:
             r = collect_states_one(
-                env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride
+                env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, stride,
+                want_sim_state=want_sim_state,
             )
             r["idx"] = i
         except Exception as e:
@@ -400,10 +420,83 @@ def handle_eval_regret(job):
     return results
 
 
+# ── successor_advantages command ────────────────────────────────────
+#
+# For each snapshot {obs, qpos, qvel}, branch the simulator on the two
+# action variants that differ only in target_bit and estimate each
+# successor's truncated value under the current policy. Returns the per-
+# snapshot advantage A(s) = V(next(s,a1)) - V(next(s,a0)).
+
+
+def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim):
+    env.unwrapped.set_state(np.array(qpos, dtype=np.float64),
+                            np.array(qvel, dtype=np.float64))
+    obs, r, term, trunc, _ = env.step(action)
+    total = float(r)
+    if term or trunc:
+        return total
+    for _ in range(max(lookahead - 1, 0)):
+        action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+        obs, r, term, trunc, _ = env.step(action)
+        total += float(r)
+        if term or trunc:
+            break
+    return total
+
+
+def snapshot_advantage(env_name, cfg, snapshot, bit_preds, target_bit, lookahead, bits_per_dim):
+    obs = snapshot["obs"]
+    qpos = snapshot.get("qpos")
+    qvel = snapshot.get("qvel")
+    if qpos is None or qvel is None:
+        return 0.0
+
+    base_bits = [1 if eval_pred(p, obs) else 0 for p in bit_preds]
+    b0, b1 = list(base_bits), list(base_bits)
+    b0[target_bit] = 0
+    b1[target_bit] = 1
+    a0 = action_from_bits(b0, cfg, bits_per_dim)
+    a1 = action_from_bits(b1, cfg, bits_per_dim)
+
+    env_kwargs = cfg.get("env_kwargs", {})
+    env = gym.make(env_name, **env_kwargs)
+    try:
+        env.reset()
+        v0 = _lookahead_value(env, qpos, qvel, a0, bit_preds, lookahead, cfg, bits_per_dim)
+        v1 = _lookahead_value(env, qpos, qvel, a1, bit_preds, lookahead, cfg, bits_per_dim)
+        return v1 - v0
+    finally:
+        env.close()
+
+
+def handle_successor_advantages(job):
+    env_name = job["env_name"]
+    cfg = resolve_cfg(job)
+
+    snapshots = job.get("snapshots") or job.get("candidates") or []
+    bit_preds = job.get("bit_predicates", [])
+    target_bit = int(job["target_bit"])
+    lookahead = int(job.get("lookahead", 40))
+    bits_per_dim = int(job.get("bits_per_dim", 3))
+
+    results = []
+    for i, snap in enumerate(snapshots):
+        try:
+            adv = snapshot_advantage(
+                env_name, cfg, snap, bit_preds, target_bit, lookahead, bits_per_dim
+            )
+            results.append({"idx": i, "advantage": float(adv)})
+        except Exception as e:
+            log.exception("successor_advantages snapshot %d failed", i)
+            results.append({"idx": i, "error": f"{type(e).__name__}: {e}", "advantage": 0.0})
+    return results
+
+
 COMMANDS = {
     "score_bit": handle_score_bit,
     "collect_states": handle_collect_states,
     "eval_regret": handle_eval_regret,
+    "successor_advantages": handle_successor_advantages,
 }
 
 

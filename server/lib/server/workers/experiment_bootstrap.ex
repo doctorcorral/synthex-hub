@@ -235,9 +235,21 @@ defmodule Server.Workers.ExperimentBootstrap do
   and operators can correlate Batch rows back to their experiment.
   """
   def build_context(env_key, config, experiment_id) when is_atom(env_key) do
+    validate_fitness_scorer!(config)
     opts = config_to_opts(config)
     scorer = build_local_scorer(env_key, experiment_id, config)
     Synthex.Gym.Mujoco.init_context(env_key, Keyword.put(opts, :scorer, scorer))
+  end
+
+  defp validate_fitness_scorer!(config) do
+    scorer = Map.get(config, "scorer") || Map.get(config, :scorer) || "episode"
+    adapter = get_adapter(config)
+
+    if scorer in ["successor", :successor] and adapter != "mujoco" do
+      raise ArgumentError,
+            "scorer=successor requires adapter=mujoco (counterfactual set_state branching); " <>
+              "got adapter=#{inspect(adapter)}"
+    end
   end
 
   # Scorer wiring. The controller and bootstrap workers run in the
@@ -315,9 +327,15 @@ defmodule Server.Workers.ExperimentBootstrap do
       verifier_opts: verifier_opts(Map.get(config, "verifier_opts")),
       proposer: proposer(Map.get(config, "proposer")),
       proposer_opts: proposer_opts(Map.get(config, "proposer_opts")),
+      fitness_scorer: fitness_scorer(Map.get(config, "scorer")),
+      successor_lookahead: get_int(config, "successor_lookahead", 40),
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
+
+  defp fitness_scorer("successor"), do: :successor
+  defp fitness_scorer(:successor), do: :successor
+  defp fitness_scorer(_), do: :episode
 
   # Per-bit candidate proposer. Defaults to `:enumerate` (historical
   # enumerate-then-subsample search); `:ga` opts into the genetic
