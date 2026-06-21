@@ -41,6 +41,7 @@
     "max_steps": 1000,
     "max_candidates": 6000,
     "validation_guard": true,
+    "run_seed": 1,
     "chunk_size": 10,
     "collect_states_chunk_size": 4,
     "state_stride": 8,
