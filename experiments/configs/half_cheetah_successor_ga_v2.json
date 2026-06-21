@@ -1,0 +1,50 @@
+{
+  "env_key": "half_cheetah",
+  "env_name": "HalfCheetah-v5",
+  "config": {
+    "scorer": "successor",
+    "successor_mode": "solve",
+    "successor_lookahead": 100,
+    "successor_grid_levels": 4,
+    "proposer": "ga",
+    "proposer_opts": {
+      "pop_size": 192,
+      "generations": 12,
+      "elite_frac": 0.15,
+      "tournament_k": 3,
+      "crossover_rate": 0.6,
+      "mutation_rate": 0.8,
+      "max_depth": 2,
+      "init_compose_frac": 0.45
+    },
+    "adapter": "mujoco",
+    "bits_per_dim": 3,
+    "depth": 2,
+    "max_coeff": 5,
+    "feature_types": [
+      "axis",
+      "diag",
+      "sq_diag",
+      "prod",
+      "sin_axis",
+      "cos_axis",
+      "tridiag",
+      "wavelet_box",
+      "wavelet_ricker"
+    ],
+    "tridiag_max_coeff": 2,
+    "tridiag_dims": [0, 16],
+    "n_episodes": 50,
+    "top_k": 40,
+    "max_iters": 12,
+    "cegar_rounds": 8,
+    "max_steps": 1000,
+    "max_candidates": 8000,
+    "validation_guard": true,
+    "run_seed": 2,
+    "chunk_size": 10,
+    "collect_states_chunk_size": 4,
+    "state_stride": 8,
+    "poll_interval_ms": 5000
+  }
+}
