@@ -92,13 +92,13 @@ def trace_lex_score(trace: Sequence[float], reward_ceiling: float = 1000.0) -> f
 
 
 def trace_advantage(trace0: Sequence[float], trace1: Sequence[float], reward_ceiling: float = 1000.0) -> float:
-    """Signed gap for predicate scoring: lex dominance, else sum-of-trace mass."""
+    """Signed gap for predicate scoring: strict lex dominance, else trace-mass diff."""
     if list(trace0) == list(trace1):
         return 0.0
     if trace_le(trace0, trace1) and not trace_le(trace1, trace0):
-        return 1.0 + float(sum(trace1) - sum(trace0))
+        return 1.0
     if trace_le(trace1, trace0) and not trace_le(trace0, trace1):
-        return -1.0 + float(sum(trace1) - sum(trace0))
+        return -1.0
     return float(sum(trace1) - sum(trace0))
 
 
