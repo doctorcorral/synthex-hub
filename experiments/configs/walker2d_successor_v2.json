@@ -1,0 +1,46 @@
+{
+  "env_key": "walker2d",
+  "env_name": "Walker2d-v5",
+  "config": {
+    "scorer": "successor",
+    "successor_mode": "solve",
+    "successor_lookahead": 50,
+    "successor_grid_levels": 3,
+    "proposer": "ga",
+    "proposer_opts": {
+      "pop_size": 128,
+      "generations": 10,
+      "elite_frac": 0.15,
+      "tournament_k": 3,
+      "crossover_rate": 0.6,
+      "mutation_rate": 0.8,
+      "max_depth": 2,
+      "init_compose_frac": 0.45
+    },
+    "adapter": "mujoco",
+    "bits_per_dim": 3,
+    "depth": 2,
+    "max_coeff": 5,
+    "feature_types": [
+      "axis",
+      "diag",
+      "sq_diag",
+      "prod",
+      "sin_axis",
+      "cos_axis",
+      "wavelet_box",
+      "wavelet_ricker"
+    ],
+    "n_episodes": 40,
+    "top_k": 30,
+    "max_iters": 8,
+    "cegar_rounds": 4,
+    "max_steps": 1000,
+    "max_candidates": 6000,
+    "validation_guard": true,
+    "chunk_size": 10,
+    "collect_states_chunk_size": 4,
+    "state_stride": 8,
+    "poll_interval_ms": 5000
+  }
+}

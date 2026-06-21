@@ -24,6 +24,7 @@ import numpy as np
 import gymnasium as gym
 
 from feature_kernels import FEATURE_KERNELS
+from successor_solve import snapshot_trace_advantage
 
 LOG_PATH = os.environ.get("ORACLE_LOG", "/tmp/synthex_hub_worker.log")
 logging.basicConfig(
@@ -422,10 +423,15 @@ def handle_eval_regret(job):
 
 # ── successor_advantages command ────────────────────────────────────
 #
-# For each snapshot {obs, qpos, qvel}, branch the simulator on the two
-# action variants that differ only in target_bit and estimate each
-# successor's truncated value under the current policy. Returns the per-
-# snapshot advantage A(s) = V(next(s,a1)) - V(next(s,a0)).
+# For each snapshot {obs, qpos, qvel}, branch on the two action variants
+# that differ only in target_bit and compare successor traces.
+#
+# Default (successor_mode=solve): Agda SuccessorDeterministicMDP —
+#   successor-trace s a k = [solve(next(s,a),0), ..., solve(next(s,a),k-1)]
+# with solve maximising over a discrete action grid at each depth.
+#
+# Legacy (successor_mode=rollout): truncated return under the current
+# bit-policy (the previous approximation).
 
 
 def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim):
@@ -444,7 +450,7 @@ def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_pe
     return total
 
 
-def snapshot_advantage(env_name, cfg, snapshot, bit_preds, target_bit, lookahead, bits_per_dim):
+def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, lookahead, bits_per_dim):
     obs = snapshot["obs"]
     qpos = snapshot.get("qpos")
     qvel = snapshot.get("qvel")
@@ -478,13 +484,31 @@ def handle_successor_advantages(job):
     target_bit = int(job["target_bit"])
     lookahead = int(job.get("lookahead", 40))
     bits_per_dim = int(job.get("bits_per_dim", 3))
+    mode = str(job.get("successor_mode", "solve")).lower()
+    grid_levels = job.get("successor_grid_levels", 3)
+    reward_ceiling = float(job.get("successor_reward_ceiling", 1000.0))
 
     results = []
     for i, snap in enumerate(snapshots):
         try:
-            adv = snapshot_advantage(
-                env_name, cfg, snap, bit_preds, target_bit, lookahead, bits_per_dim
-            )
+            if mode == "rollout":
+                adv = snapshot_advantage_rollout(
+                    env_name, cfg, snap, bit_preds, target_bit, lookahead, bits_per_dim
+                )
+            else:
+                adv = snapshot_trace_advantage(
+                    env_name,
+                    cfg,
+                    snap,
+                    bit_preds,
+                    target_bit,
+                    lookahead,
+                    bits_per_dim,
+                    grid_levels=grid_levels,
+                    reward_ceiling=reward_ceiling,
+                    eval_pred_fn=eval_pred,
+                    action_from_bits_fn=action_from_bits,
+                )
             results.append({"idx": i, "advantage": float(adv)})
         except Exception as e:
             log.exception("successor_advantages snapshot %d failed", i)

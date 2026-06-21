@@ -329,6 +329,15 @@ defmodule Server.Workers.ExperimentBootstrap do
       proposer_opts: proposer_opts(Map.get(config, "proposer_opts")),
       fitness_scorer: fitness_scorer(Map.get(config, "scorer")),
       successor_lookahead: get_int(config, "successor_lookahead", 40),
+      successor_mode: successor_mode(Map.get(config, "successor_mode", "solve")),
+      successor_grid_levels: Map.get(config, "successor_grid_levels", 3),
+      successor_reward_ceiling:
+        case Map.get(config, "successor_reward_ceiling") do
+          nil -> 1000.0
+          v when is_number(v) -> v * 1.0
+          v when is_binary(v) -> String.to_float(v)
+          _ -> 1000.0
+        end,
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
@@ -336,6 +345,10 @@ defmodule Server.Workers.ExperimentBootstrap do
   defp fitness_scorer("successor"), do: :successor
   defp fitness_scorer(:successor), do: :successor
   defp fitness_scorer(_), do: :episode
+
+  defp successor_mode("rollout"), do: :rollout
+  defp successor_mode(:rollout), do: :rollout
+  defp successor_mode(_), do: :solve
 
   # Per-bit candidate proposer. Defaults to `:enumerate` (historical
   # enumerate-then-subsample search); `:ga` opts into the genetic

@@ -3,6 +3,7 @@
   "env_name": "Walker2d-v5",
   "config": {
     "scorer": "successor",
+    "successor_mode": "solve",
     "successor_lookahead": 40,
     "proposer": "enumerate",
     "adapter": "mujoco",
