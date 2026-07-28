@@ -487,6 +487,7 @@ def handle_successor_advantages(job):
     mode = str(job.get("successor_mode", "solve")).lower()
     grid_levels = job.get("successor_grid_levels", 3)
     reward_ceiling = float(job.get("successor_reward_ceiling", 1000.0))
+    solve_step_budget = int(job.get("successor_solve_budget", 1_000_000))
 
     results = []
     for i, snap in enumerate(snapshots):
@@ -506,6 +507,7 @@ def handle_successor_advantages(job):
                     bits_per_dim,
                     grid_levels=grid_levels,
                     reward_ceiling=reward_ceiling,
+                    solve_step_budget=solve_step_budget,
                     eval_pred_fn=eval_pred,
                     action_from_bits_fn=action_from_bits,
                 )

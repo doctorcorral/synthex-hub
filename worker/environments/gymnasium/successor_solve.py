@@ -102,10 +102,29 @@ def trace_advantage(trace0: Sequence[float], trace1: Sequence[float], reward_cei
     return float(sum(trace1) - sum(trace0))
 
 
+def max_feasible_horizon(n_actions: int, horizon: int, step_budget: int) -> int:
+    """Largest trace length k whose exact solve cost fits in ``step_budget``.
+
+    solve(s, d) recurses over the full action grid: computing depth d costs
+    ``n_actions^(d+1)`` sim steps (the state cache almost never hits on
+    continuous states), so a k-trace costs ``sum_{d<k} n_actions^(d+1)``.
+    Without this clamp a request like lookahead=50 on a 729-action grid is
+    ~729^50 steps — the job would simply never return.
+    """
+    cost = 0
+    k = 0
+    while k < horizon:
+        cost += n_actions ** (k + 1)
+        if cost > step_budget:
+            break
+        k += 1
+    return max(k, 1)
+
+
 class SolveEngine:
     """Memoized finite-horizon solve on a single MuJoCo env instance."""
 
-    __slots__ = ("env", "action_grid", "bottom", "decimals", "_cache")
+    __slots__ = ("env", "raw", "action_grid", "bottom", "decimals", "step_budget", "_cache")
 
     def __init__(
         self,
@@ -114,19 +133,28 @@ class SolveEngine:
         *,
         bottom: float = 0.0,
         state_decimals: int = 3,
+        step_budget: int = 1_000_000,
     ):
         self.env = env
+        # Step through the UNWRAPPED env. gym.make wraps in TimeLimit whose
+        # step counter accumulates across counterfactual branches (set_state
+        # does not reset it), so after max_episode_steps cumulative steps
+        # every branch reports truncated=True and solve sees bottom
+        # everywhere — silently zeroing all advantages. The raw MuJoCo env
+        # has no step budget; genuine termination (falls) still surfaces
+        # via `terminated`.
+        self.raw = env.unwrapped
         self.action_grid = action_grid
         self.bottom = float(bottom)
         self.decimals = int(state_decimals)
+        self.step_budget = int(step_budget)
         self._cache: Dict[Tuple[Tuple[float, ...], Tuple[float, ...], int], float] = {}
 
     def _step(self, qpos: np.ndarray, qvel: np.ndarray, action: np.ndarray):
-        self.env.unwrapped.set_state(qpos, qvel)
-        obs, reward, term, trunc, _ = self.env.step(action)
-        u = self.env.unwrapped
-        nq = u.data.qpos.copy()
-        nv = u.data.qvel.copy()
+        self.raw.set_state(qpos, qvel)
+        obs, reward, term, trunc, _ = self.raw.step(action)
+        nq = self.raw.data.qpos.copy()
+        nv = self.raw.data.qvel.copy()
         return nq, nv, obs, float(reward), bool(term or trunc)
 
     def _immediate_best(self, qpos: np.ndarray, qvel: np.ndarray) -> float:
@@ -159,8 +187,11 @@ class SolveEngine:
         self._cache[key] = best
         return best
 
+    def _clamped_k(self, horizon: int) -> int:
+        return max_feasible_horizon(len(self.action_grid), max(int(horizon), 0), self.step_budget)
+
     def value_trace(self, qpos: np.ndarray, qvel: np.ndarray, horizon: int) -> List[float]:
-        k = max(int(horizon), 0)
+        k = self._clamped_k(horizon)
         return [self.solve(qpos, qvel, d) for d in range(k)]
 
     def successor_trace(
@@ -171,10 +202,13 @@ class SolveEngine:
         horizon: int,
     ) -> List[float]:
         """``successor-trace s a k`` — trace from ``next(s,a)``, excluding ``r(s,a)``."""
+        k = self._clamped_k(horizon)
         nq, nv, _, _, done = self._step(qpos, qvel, branch_action)
         if done:
-            return [self.bottom] * max(int(horizon), 0)
-        return self.value_trace(nq, nv, horizon)
+            # Dead branch: bottom at every depth, same length as the live
+            # branch so lex comparison stays positional.
+            return [self.bottom] * k
+        return [self.solve(nq, nv, d) for d in range(k)]
 
 
 def snapshot_trace_advantage(
@@ -188,6 +222,7 @@ def snapshot_trace_advantage(
     *,
     grid_levels=3,
     reward_ceiling: float = 1000.0,
+    solve_step_budget: int = 1_000_000,
     eval_pred_fn,
     action_from_bits_fn,
 ) -> float:
@@ -212,7 +247,7 @@ def snapshot_trace_advantage(
     try:
         env.reset()
         grid = build_action_grid(cfg, bits_per_dim, grid_levels)
-        engine = SolveEngine(env, grid)
+        engine = SolveEngine(env, grid, step_budget=solve_step_budget)
         t0 = engine.successor_trace(qpos, qvel, a0, horizon)
         t1 = engine.successor_trace(qpos, qvel, a1, horizon)
         return trace_advantage(t0, t1, reward_ceiling)
