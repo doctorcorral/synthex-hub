@@ -57,6 +57,12 @@
         
         /* Prevent click events inside card from triggering expansion */
         .no-expand { cursor: auto; }
+
+        /* Policy variant switcher (cards with multiple policies per env) */
+        .variant.hidden { display: none; }
+        .variant-btn { background: #434C5E; color: #D8DEE9; font-size: 0.75rem; padding: 0.25rem 0.75rem; border-radius: 9999px; border: 1px solid #4C566A; cursor: pointer; transition: all 0.15s; }
+        .variant-btn:hover { border-color: #81A1C1; }
+        .variant-btn.active { background: #5E81AC; color: #ECEFF4; border-color: #81A1C1; }
     </style>
 </head>
 <body class="min-h-screen p-8 font-sans">
@@ -73,23 +79,94 @@
 
         <!-- Continuous Control Row 1 -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8" id="card-grid">
-            <!-- Half Cheetah -->
+            <!-- Half Cheetah (two policies: imitation-seeded CEGAR and pure GA) -->
             <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
                 <div>
                     <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo HalfCheetah-v5</h2>
+                    <div class="flex items-center gap-2 mb-4 flex-wrap no-expand" onclick="event.stopPropagation()">
+                        <button class="variant-btn active" onclick="switchVariant(this, 'cegar', event)">CEGAR &middot; ~6150</button>
+                        <button class="variant-btn" onclick="switchVariant(this, 'ga', event)">GA &middot; ~3700</button>
+                    </div>
+                </div>
+                <div class="variant flex flex-col flex-1" data-variant="cegar">
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~6150</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 17D</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 6D (30 bits)</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Imitation-seeded CEGAR</span>
+                    </div>
+                    <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/halfcheetah_ultimate.mp4', event)">
+                        <video autoplay loop muted class="w-full h-auto">
+                            <source src="videos/halfcheetah_ultimate.mp4" type="video/mp4">
+                        </video>
+                    </div>
+                    <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                        <pre><code class="language-python">def policy(obs):
+    bits = [0] * 30
+    # bthigh (Back Thigh)
+    if (-3*obs[4] + obs[3] < 0) and (-5*obs[10] + obs[12] < 0): bits[0] = 1
+    if (obs[10]*obs[14] < 0.4) and (5*obs[0] + obs[3] < 0): bits[1] = 1
+    if (1*obs[8]**2 + obs[11] < 0) or (2*obs[8]**2 + obs[13] < 0): bits[2] = 1
+    if (-4*obs[13] + obs[10] < 0) or (-3*obs[13] + obs[10] < 0): bits[3] = 1
+    if (-2*obs[13] + obs[3] < 0) or (-2*obs[13] + obs[6] < 0): bits[4] = 1
+
+    # bshin (Back Shin)
+    if (3*obs[3]**2 + obs[9] < 0) and (2*obs[1] + obs[5] < 0): bits[5] = 1
+    if (3*obs[11] + obs[12] < 0) or (3*obs[6] + obs[11] < 0): bits[6] = 1
+    if (1*obs[11] + obs[13] < 0) and (3*obs[13] + obs[11] < 0): bits[7] = 1
+    if (4*obs[0]**2 + obs[4] < 0) or (4*obs[4] + obs[3] < 0): bits[8] = 1
+    if (1*obs[3]**2 + obs[4] < 0) and (-5*obs[3] + obs[11] < 0): bits[9] = 1
+
+    # bfoot (Back Foot)
+    if (2*obs[12] + obs[5] < 0) or (3*obs[12] + obs[9] < 0): bits[10] = 1
+    if (-3*obs[0]**2 + obs[1] < 0) or (obs[1]*obs[14] < 0.713): bits[11] = 1
+    if (obs[0]*obs[9] < -0.0868) or (obs[7]*obs[16] < -2.39): bits[12] = 1
+    if (obs[2] < 0.02) or (-0.05*obs[9]**2 + obs[2] < 0): bits[13] = 1
+    if (-1*obs[13] + obs[2] < 0) or (-1*obs[13] + obs[4] < 0): bits[14] = 1
+
+    # fthigh (Front Thigh)
+    if (3*obs[4] + obs[11] < 0) and (5*obs[0] + obs[11] < 0): bits[15] = 1
+    if (obs[4] < 0.11) or (-1*obs[3] + obs[4] < 0): bits[16] = 1
+    if (-1*obs[1] + obs[2] < 0) and (3*obs[0] + obs[2] < 0): bits[17] = 1
+    if (4*obs[2]**2 + obs[6] < 0) or (2*obs[10]**2 + obs[11] < 0): bits[18] = 1
+    if (obs[0]*obs[1] < -0.0115) and (obs[2]*obs[11] < 0.2): bits[19] = 1
+
+    # fshin (Front Shin)
+    if (-3*obs[0] + obs[4] < 0) and (5*obs[4] + obs[11] < 0): bits[20] = 1
+    if (obs[0]*obs[7] < 0.0389) and (-0.5*obs[9]**2 + obs[13] < 0): bits[21] = 1
+    if (-5*obs[1] + obs[13] < 0) or (3*obs[13] + obs[14] < 0): bits[22] = 1
+    if (5*obs[2]**2 + obs[4] < 0) or (3*obs[3]**2 + obs[5] < 0): bits[23] = 1
+    if (5*obs[3] + obs[11] < 0) and (4*obs[5] + obs[4] < 0): bits[24] = 1
+
+    # ffoot (Front Foot)
+    if (3*obs[9]**2 + obs[6] < 0) or (obs[5]*obs[9] < 0.197): bits[25] = 1
+    if (-5*obs[9] + obs[3] < 0) and (1*obs[8] + obs[12] < 0): bits[26] = 1
+    if (-4*obs[0] + obs[7] < 0) or (obs[1]*obs[5] < -0.229): bits[27] = 1
+    if (2*obs[16] + obs[11] < 0) and (obs[5]*obs[8] < 0): bits[28] = 1
+    if (obs[8] < 0.14) or (-0.2*obs[9]**2 + obs[8] < 0): bits[29] = 1
+
+    weights = [1, 2, 4, 8, 16]
+    actions = [0.0] * 6
+    for d in range(6):
+        s = sum(weights[i] * bits[d*5+i] for i in range(5))
+        actions[d] = -1.0 + 2.0 * s / 31
+    return actions</code></pre>
+                    </div>
+                </div>
+                <div class="variant flex flex-col flex-1 hidden" data-variant="ga">
                     <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
                         <span class="bg-nord2 px-2 py-1 rounded">Score: ~3700</span>
                         <span class="bg-nord2 px-2 py-1 rounded">State: 17D</span>
                         <span class="bg-nord2 px-2 py-1 rounded">Action: 6D (18 bits)</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Genetic Algorithm</span>
                     </div>
-                </div>
-                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/halfcheetah.mp4', event)">
-                    <video autoplay loop muted class="w-full h-auto">
-                        <source src="videos/halfcheetah.mp4" type="video/mp4">
-                    </video>
-                </div>
-                <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
-                    <pre><code class="language-python">def policy(obs):
+                    <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/halfcheetah.mp4', event)">
+                        <video loop muted class="w-full h-auto">
+                            <source src="videos/halfcheetah.mp4" type="video/mp4">
+                        </video>
+                    </div>
+                    <div class="code-section mt-auto overflow-x-auto no-expand" onclick="event.stopPropagation()">
+                        <pre><code class="language-python">def policy(obs):
     bits = [0] * 18
     # bthigh (Back Thigh)
     if (2*obs[10] + obs[5] < 0) and (3*obs[10] + obs[15] < 0): bits[0] = 1
@@ -127,6 +204,7 @@
         s = sum(weights[i] * bits[d*3+i] for i in range(3))
         actions[d] = -1.0 + 2.0 * s / 7
     return actions</code></pre>
+                    </div>
                 </div>
             </section>
 
@@ -494,6 +572,23 @@
                 modalVideoSource.src = '';
                 modal.classList.remove('show');
             }
+        }
+
+        // Switch between policy variants inside a card (e.g. two policies
+        // for the same env). Shows the matching .variant block, pauses the
+        // hidden video, and plays the visible one.
+        function switchVariant(btn, name, event) {
+            if (event) event.stopPropagation();
+            const card = btn.closest('.card');
+            card.querySelectorAll('.variant-btn').forEach(b => b.classList.toggle('active', b === btn));
+            card.querySelectorAll('.variant').forEach(v => {
+                const show = v.dataset.variant === name;
+                v.classList.toggle('hidden', !show);
+                const vid = v.querySelector('video');
+                if (vid) {
+                    if (show) { vid.play().catch(() => {}); } else { vid.pause(); }
+                }
+            });
         }
 
         function toggleExpand(element) {
