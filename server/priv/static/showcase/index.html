@@ -84,8 +84,8 @@
                 <div>
                     <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo HalfCheetah-v5</h2>
                     <div class="flex items-center gap-2 mb-4 flex-wrap no-expand" onclick="event.stopPropagation()">
-                        <button class="variant-btn active" onclick="switchVariant(this, 'cegar', event)">CEGAR &middot; ~6150</button>
-                        <button class="variant-btn" onclick="switchVariant(this, 'ga', event)">GA &middot; ~3700</button>
+                        <button class="variant-btn active" onclick="switchVariant(this, 'cegar', event)">~6150 &middot; 30 bits</button>
+                        <button class="variant-btn" onclick="switchVariant(this, 'compact', event)">~3700 &middot; 18 bits</button>
                     </div>
                 </div>
                 <div class="variant flex flex-col flex-1" data-variant="cegar">
@@ -153,12 +153,11 @@
     return actions</code></pre>
                     </div>
                 </div>
-                <div class="variant flex flex-col flex-1 hidden" data-variant="ga">
+                <div class="variant flex flex-col flex-1 hidden" data-variant="compact">
                     <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
                         <span class="bg-nord2 px-2 py-1 rounded">Score: ~3700</span>
                         <span class="bg-nord2 px-2 py-1 rounded">State: 17D</span>
                         <span class="bg-nord2 px-2 py-1 rounded">Action: 6D (18 bits)</span>
-                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Genetic Algorithm</span>
                     </div>
                     <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/halfcheetah.mp4', event)">
                         <video loop muted class="w-full h-auto">
