@@ -435,15 +435,21 @@ def handle_eval_regret(job):
 
 
 def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim):
-    env.unwrapped.set_state(np.array(qpos, dtype=np.float64),
-                            np.array(qvel, dtype=np.float64))
-    obs, r, term, trunc, _ = env.step(action)
+    # Step the *unwrapped* env. The TimeLimit wrapper accumulates steps
+    # across the two counterfactual branches scored per snapshot (v0 then
+    # v1), so at full-horizon lookaheads (>= max_episode_steps) the second
+    # branch would start already truncated and score garbage. Termination
+    # still comes from the env itself; the lookahead cap bounds the loop.
+    raw = env.unwrapped
+    raw.set_state(np.array(qpos, dtype=np.float64),
+                  np.array(qvel, dtype=np.float64))
+    obs, r, term, trunc, _ = raw.step(action)
     total = float(r)
     if term or trunc:
         return total
     for _ in range(max(lookahead - 1, 0)):
         action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
-        obs, r, term, trunc, _ = env.step(action)
+        obs, r, term, trunc, _ = raw.step(action)
         total += float(r)
         if term or trunc:
             break
