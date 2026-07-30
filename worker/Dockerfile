@@ -5,7 +5,7 @@ ENV MIX_ENV=prod \
     LC_ALL=C.UTF-8
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
+    python3 python3-dev python3-pip python3-venv \
     build-essential libosmesa6-dev patchelf \
     swig \
     ca-certificates curl git \
