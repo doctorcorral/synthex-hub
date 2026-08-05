@@ -84,13 +84,14 @@ defmodule Worker.Registrar do
   # preferred first. The hub hard-filters chunks to adapters in
   # this list and soft-orders by position, so a GPU box configured
   # with `["mujoco_warp", "mujoco"]` drains Warp work first but
-  # falls back to plain MuJoCo when idle. Defaults to `["mujoco"]`
-  # — the CPU swarm — so a worker that doesn't set WORKER_CAPABILITIES
-  # behaves exactly as before capability routing existed.
+  # falls back to plain MuJoCo when idle. The default (normally
+  # resolved in runtime.exs; this clause is a belt-and-braces
+  # fallback) includes "mujoco_shaped": same CPU oracle, the tag
+  # just marks worker-code freshness — see runtime.exs.
   defp capabilities do
     case Application.get_env(:worker, :capabilities) do
       list when is_list(list) and list != [] -> Enum.map(list, &to_string/1)
-      _ -> ["mujoco"]
+      _ -> ["mujoco", "mujoco_shaped"]
     end
   end
 end

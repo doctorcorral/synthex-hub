@@ -32,18 +32,27 @@ oracle_script =
 # WORKER_CAPABILITIES is a comma-separated, preference-ordered list
 # of physics adapters this worker can run, e.g. "mujoco_warp,mujoco"
 # for a CUDA box that prefers Warp but will fall back to plain
-# MuJoCo. Defaults to "mujoco" — the CPU swarm. The hub uses this
-# to route chunks (hard filter on membership, soft sort on order),
-# so a CPU worker must NOT advertise mujoco_warp (it can't run it),
-# and the chosen ORACLE_SCRIPT must actually implement every adapter
-# listed here.
+# MuJoCo. The hub uses this to route chunks (hard filter on
+# membership, soft sort on order), so a CPU worker must NOT advertise
+# mujoco_warp (it can't run it), and the chosen ORACLE_SCRIPT must
+# actually implement every adapter listed here.
+#
+# Default: "mujoco,mujoco_shaped". "mujoco_shaped" is the SAME CPU
+# oracle — the tag marks worker-code freshness, not different physics.
+# It routes experiments that depend on recent oracle behavior
+# (env_kwargs-bearing env_specs, the rollout TimeLimit fix,
+# successor_continuation payloads) away from stale images that would
+# silently ignore those fields and score them under different
+# semantics. Any image built from current source qualifies, so it
+# advertises the tag out of the box; older images keep their old
+# "mujoco"-only default and never see such chunks.
 capabilities =
   case System.get_env("WORKER_CAPABILITIES") do
     nil ->
-      ["mujoco"]
+      ["mujoco", "mujoco_shaped"]
 
     "" ->
-      ["mujoco"]
+      ["mujoco", "mujoco_shaped"]
 
     csv ->
       csv
@@ -51,7 +60,7 @@ capabilities =
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
       |> case do
-        [] -> ["mujoco"]
+        [] -> ["mujoco", "mujoco_shaped"]
         list -> list
       end
   end
