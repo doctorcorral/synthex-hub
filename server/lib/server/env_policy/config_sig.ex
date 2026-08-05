@@ -96,7 +96,15 @@ defmodule Server.EnvPolicy.ConfigSig do
     # field — the predicate form is unchanged — but successor-ranked and
     # episode-ranked policies are different experiments. Forked backward-
     # compatibly in `stable_encode/1`: the default (`episode`) is omitted.
-    "scorer" => "episode"
+    "scorer" => "episode",
+    # Structured continuation for successor rollout lookaheads (e.g. a
+    # fixed reference gait cycle standing in for V*). NOT a policy-shape
+    # field, but it changes the ranking objective fundamentally — a
+    # cycle-continuation policy must not inherit incumbent-continuation
+    # commits or vice versa. Forked backward-compatibly in
+    # `stable_encode/1`: the default (nil, incumbent continuation) is
+    # omitted from the digest.
+    "successor_continuation" => nil
   }
 
   @feature_canonical %{
@@ -144,11 +152,19 @@ defmodule Server.EnvPolicy.ConfigSig do
     scorer_raw =
       Map.get(config, "scorer", Map.get(config, :scorer, @defaults["scorer"]))
 
+    continuation_raw =
+      Map.get(
+        config,
+        "successor_continuation",
+        Map.get(config, :successor_continuation, @defaults["successor_continuation"])
+      )
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
     |> Map.put("proposer", canonical_proposer(proposer_raw))
     |> Map.put("scorer", canonical_scorer(scorer_raw))
+    |> Map.put("successor_continuation", canonical_continuation(continuation_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -238,7 +254,27 @@ defmodule Server.EnvPolicy.ConfigSig do
         s -> ",\"scorer\":" <> Jason.encode!(s)
       end
 
-    "{" <> body <> verifier_suffix <> run_seed_suffix <> proposer_suffix <> scorer_suffix <> "}"
+    # Fork on the successor continuation. Hand-built key order (type,
+    # hold, actions) keeps the digest deterministic; the actions list is
+    # part of the identity — two different reference cycles are two
+    # different ranking objectives and must be separate lineages.
+    continuation_suffix =
+      case Map.get(map, "successor_continuation") do
+        %{"type" => type, "hold" => hold, "actions" => actions} ->
+          ",\"successor_continuation\":{\"type\":" <>
+            Jason.encode!(type) <>
+            ",\"hold\":" <>
+            Jason.encode!(hold) <>
+            ",\"actions\":" <> Jason.encode!(actions) <> "}"
+
+        _ ->
+          ""
+      end
+
+    "{" <>
+      body <>
+      verifier_suffix <>
+      run_seed_suffix <> proposer_suffix <> scorer_suffix <> continuation_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -280,6 +316,28 @@ defmodule Server.EnvPolicy.ConfigSig do
 
   defp canonical_verifier(v) when v in ["ga_qd", :ga_qd], do: "ga_qd"
   defp canonical_verifier(_), do: "random"
+
+  defp canonical_continuation(%{} = cont) do
+    type = Map.get(cont, "type") || Map.get(cont, :type)
+    actions = Map.get(cont, "actions") || Map.get(cont, :actions)
+    hold = Map.get(cont, "hold") || Map.get(cont, :hold) || 1
+
+    if to_string(type) == "cycle" and is_list(actions) and actions != [] do
+      %{
+        "type" => "cycle",
+        "hold" => canonical_int(hold),
+        "actions" => Enum.map(actions, fn row -> Enum.map(row, &(&1 * 1.0)) end)
+      }
+    else
+      nil
+    end
+  end
+
+  defp canonical_continuation(_), do: nil
+
+  defp canonical_int(n) when is_integer(n), do: n
+  defp canonical_int(n) when is_float(n), do: trunc(n)
+  defp canonical_int(_), do: 1
 
   defp canonical_run_seed(n) when is_integer(n) and n >= 0, do: n
   defp canonical_run_seed(n) when is_float(n) and n >= 0, do: trunc(n)

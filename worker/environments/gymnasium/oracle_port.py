@@ -70,9 +70,18 @@ ENV_CONFIGS = {
         "n_action_dims": 6, "action_low": -1.0, "action_high": 1.0,
         "max_steps": 1000, "success_threshold": 1000,
     },
+    # healthy_reward=0 removes the 1.0/step standing bonus from ALL
+    # scoring paths (candidate scoring, successor rollouts, regret).
+    # With the bonus in the objective, "stand still and don't fall"
+    # (~1000/episode) dominates any fragile early gait, and every
+    # hill-climbing synthesis run collapses into that attractor —
+    # confirmed empirically even when seeded with a walking policy.
+    # Survival pressure is still enforced by unhealthy termination.
+    # Same rationale as Hopper above.
     "Walker2d-v5": {
         "n_action_dims": 6, "action_low": -1.0, "action_high": 1.0,
         "max_steps": 1000, "success_threshold": 500,
+        "env_kwargs": {"healthy_reward": 0.0},
     },
     "Ant-v5": {
         "n_action_dims": 8, "action_low": -1.0, "action_high": 1.0,
@@ -434,12 +443,25 @@ def handle_eval_regret(job):
 # bit-policy (the previous approximation).
 
 
-def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim):
+def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim,
+                     continuation=None):
     # Step the *unwrapped* env. The TimeLimit wrapper accumulates steps
     # across the two counterfactual branches scored per snapshot (v0 then
     # v1), so at full-horizon lookaheads (>= max_episode_steps) the second
     # branch would start already truncated and score garbage. Termination
     # still comes from the env itself; the lookahead cap bounds the loop.
+    #
+    # `continuation` (optional): a structured stand-in for the solve
+    # operator's optimal continuation. Default (None) follows the
+    # incumbent bit-policy after the flipped first action — a V^pi
+    # improvement operator, which cannot see "sacrifice now, gain later"
+    # payoffs the incumbent can't collect (e.g. Walker2d's standing
+    # policies score every escape flip as a pure survival loss).
+    # {"type": "cycle", "actions": [[...] x n], "hold": h} instead
+    # follows a fixed reference gait cycle open-loop: the branch value
+    # then measures how good the post-flip state is as a launchpad for
+    # a known skill, which is a tractable approximation of V* that
+    # restores gain-later visibility under the RAW reward.
     raw = env.unwrapped
     raw.set_state(np.array(qpos, dtype=np.float64),
                   np.array(qvel, dtype=np.float64))
@@ -447,8 +469,17 @@ def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_pe
     total = float(r)
     if term or trunc:
         return total
-    for _ in range(max(lookahead - 1, 0)):
-        action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+
+    cyc = None
+    if isinstance(continuation, dict) and continuation.get("type") == "cycle":
+        cyc = np.asarray(continuation["actions"], dtype=np.float64)
+        hold = max(1, int(continuation.get("hold", 1)))
+
+    for t in range(max(lookahead - 1, 0)):
+        if cyc is not None:
+            action = cyc[(t // hold) % len(cyc)]
+        else:
+            action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
         obs, r, term, trunc, _ = raw.step(action)
         total += float(r)
         if term or trunc:
@@ -456,7 +487,8 @@ def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_pe
     return total
 
 
-def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, lookahead, bits_per_dim):
+def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, lookahead, bits_per_dim,
+                               continuation=None):
     obs = snapshot["obs"]
     qpos = snapshot.get("qpos")
     qvel = snapshot.get("qvel")
@@ -474,8 +506,10 @@ def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, l
     env = gym.make(env_name, **env_kwargs)
     try:
         env.reset()
-        v0 = _lookahead_value(env, qpos, qvel, a0, bit_preds, lookahead, cfg, bits_per_dim)
-        v1 = _lookahead_value(env, qpos, qvel, a1, bit_preds, lookahead, cfg, bits_per_dim)
+        v0 = _lookahead_value(env, qpos, qvel, a0, bit_preds, lookahead, cfg, bits_per_dim,
+                              continuation=continuation)
+        v1 = _lookahead_value(env, qpos, qvel, a1, bit_preds, lookahead, cfg, bits_per_dim,
+                              continuation=continuation)
         return v1 - v0
     finally:
         env.close()
@@ -494,13 +528,15 @@ def handle_successor_advantages(job):
     grid_levels = job.get("successor_grid_levels", 3)
     reward_ceiling = float(job.get("successor_reward_ceiling", 1000.0))
     solve_step_budget = int(job.get("successor_solve_budget", 1_000_000))
+    continuation = job.get("successor_continuation")
 
     results = []
     for i, snap in enumerate(snapshots):
         try:
             if mode == "rollout":
                 adv = snapshot_advantage_rollout(
-                    env_name, cfg, snap, bit_preds, target_bit, lookahead, bits_per_dim
+                    env_name, cfg, snap, bit_preds, target_bit, lookahead, bits_per_dim,
+                    continuation=continuation,
                 )
             else:
                 adv = snapshot_trace_advantage(

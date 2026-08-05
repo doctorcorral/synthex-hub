@@ -241,14 +241,23 @@ defmodule Server.Workers.ExperimentBootstrap do
     Synthex.Gym.Mujoco.init_context(env_key, Keyword.put(opts, :scorer, scorer))
   end
 
+  # Adapters that run the standard CPU oracle (set_state branching
+  # available). "mujoco_shaped" is the same oracle on workers whose
+  # baked env configs include reward-shaping env_kwargs (e.g.
+  # Walker2d healthy_reward=0); the distinct tag routes those chunks
+  # ONLY to workers rebuilt with the new table, so one experiment is
+  # never scored under two different reward definitions by a mixed
+  # fleet.
+  @cpu_successor_adapters ["mujoco", "mujoco_shaped"]
+
   defp validate_fitness_scorer!(config) do
     scorer = Map.get(config, "scorer") || Map.get(config, :scorer) || "episode"
     adapter = get_adapter(config)
 
-    if scorer in ["successor", :successor] and adapter != "mujoco" do
+    if scorer in ["successor", :successor] and adapter not in @cpu_successor_adapters do
       raise ArgumentError,
-            "scorer=successor requires adapter=mujoco (counterfactual set_state branching); " <>
-              "got adapter=#{inspect(adapter)}"
+            "scorer=successor requires a CPU mujoco adapter (counterfactual set_state " <>
+              "branching); allowed=#{inspect(@cpu_successor_adapters)}, got adapter=#{inspect(adapter)}"
     end
   end
 
@@ -338,6 +347,7 @@ defmodule Server.Workers.ExperimentBootstrap do
           v when is_binary(v) -> String.to_float(v)
           _ -> 1000.0
         end,
+      successor_continuation: Map.get(config, "successor_continuation"),
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
