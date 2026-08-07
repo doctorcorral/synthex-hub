@@ -111,7 +111,21 @@ defmodule Server.Workers.ExperimentBootstrap do
         # (or an existing lineage that has no predicates yet because
         # we backfilled it empty). Evaluate the empty-policy baseline
         # and seed env_policies with it.
-        initial_preds = Synthex.Gym.Mujoco.initial_predicates(ctx)
+        #
+        # `seed_predicates` in the config transplants a policy from
+        # another lineage as the starting point (e.g. a walking policy
+        # discovered under a shaped reward, re-based onto the raw-reward
+        # objective). Lineage inheritance can't express this — sigs
+        # fork precisely because the objectives differ — so it's an
+        # explicit, fresh-lineage-only escape hatch. The baseline is
+        # re-measured under THIS experiment's scoring, so the commit
+        # gate is calibrated to the new objective from the first bit.
+        initial_preds =
+          case seed_predicates(exp.config, ctx) do
+            nil -> Synthex.Gym.Mujoco.initial_predicates(ctx)
+            preds -> preds
+          end
+
         baseline = measure_baseline(initial_preds, ctx)
 
         encoded = %{"preds" => Enum.map(initial_preds, &PrettyPrint.to_json_term/1)}
@@ -211,6 +225,30 @@ defmodule Server.Workers.ExperimentBootstrap do
     do: Enum.map(list, &PrettyPrint.from_json_term/1)
 
   defp decode_predicates(_), do: []
+
+  # Optional transplant of a starting policy into a fresh lineage.
+  # Accepts the same JSON predicate terms stored on env_policies
+  # (i.e. what the API returns under predicates.preds). Hard-fails on
+  # a bit-count mismatch rather than starting a nonsense run: a
+  # predicate vector only makes sense for the exact policy shape it
+  # was synthesized under.
+  defp seed_predicates(config, ctx) do
+    case Map.get(config, "seed_predicates") do
+      list when is_list(list) and list != [] ->
+        preds = Enum.map(list, &PrettyPrint.from_json_term/1)
+
+        if length(preds) != ctx.n_bits do
+          raise ArgumentError,
+                "seed_predicates has #{length(preds)} bits but this config's " <>
+                  "policy shape needs #{ctx.n_bits}"
+        end
+
+        preds
+
+      _ ->
+        nil
+    end
+  end
 
   # Streaming CEGAR controller (`docs/streaming-cegar.md` §Layer 3 /
   # "Step 2" of the deployment plan).
@@ -348,6 +386,11 @@ defmodule Server.Workers.ExperimentBootstrap do
           _ -> 1000.0
         end,
       successor_continuation: Map.get(config, "successor_continuation"),
+      commit_slack:
+        case Map.get(config, "commit_slack") do
+          v when is_number(v) -> v * 1.0
+          _ -> 0.0
+        end,
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
