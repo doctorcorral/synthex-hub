@@ -386,6 +386,11 @@ defmodule Server.Workers.ExperimentBootstrap do
           _ -> 1000.0
         end,
       successor_continuation: Map.get(config, "successor_continuation"),
+      env_kwargs:
+        case Map.get(config, "env_kwargs") do
+          kw when is_map(kw) -> kw
+          _ -> nil
+        end,
       commit_slack:
         case Map.get(config, "commit_slack") do
           v when is_number(v) -> v * 1.0

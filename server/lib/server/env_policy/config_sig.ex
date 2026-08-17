@@ -104,7 +104,13 @@ defmodule Server.EnvPolicy.ConfigSig do
     # commits or vice versa. Forked backward-compatibly in
     # `stable_encode/1`: the default (nil, incumbent continuation) is
     # omitted from the digest.
-    "successor_continuation" => nil
+    "successor_continuation" => nil,
+    # Per-experiment gym.make kwargs merged over the env_key's registry
+    # entry (the reward-annealing knob, e.g. healthy_reward=0.1). Two
+    # runs under different reward definitions are different experiments
+    # that must NOT inherit each other's commits. Forked backward-
+    # compatibly in `stable_encode/1`: the default (nil) is omitted.
+    "env_kwargs" => nil
   }
 
   @feature_canonical %{
@@ -159,12 +165,16 @@ defmodule Server.EnvPolicy.ConfigSig do
         Map.get(config, :successor_continuation, @defaults["successor_continuation"])
       )
 
+    env_kwargs_raw =
+      Map.get(config, "env_kwargs", Map.get(config, :env_kwargs, @defaults["env_kwargs"]))
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
     |> Map.put("proposer", canonical_proposer(proposer_raw))
     |> Map.put("scorer", canonical_scorer(scorer_raw))
     |> Map.put("successor_continuation", canonical_continuation(continuation_raw))
+    |> Map.put("env_kwargs", canonical_env_kwargs(env_kwargs_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -271,10 +281,28 @@ defmodule Server.EnvPolicy.ConfigSig do
           ""
       end
 
+    # Fork on per-experiment env kwargs. Keys sorted so the digest is
+    # deterministic regardless of map construction order.
+    env_kwargs_suffix =
+      case Map.get(map, "env_kwargs") do
+        kw when is_map(kw) and map_size(kw) > 0 ->
+          inner =
+            kw
+            |> Enum.sort_by(fn {k, _} -> k end)
+            |> Enum.map(fn {k, v} -> Jason.encode!(k) <> ":" <> Jason.encode!(v) end)
+            |> Enum.join(",")
+
+          ",\"env_kwargs\":{" <> inner <> "}"
+
+        _ ->
+          ""
+      end
+
     "{" <>
       body <>
       verifier_suffix <>
-      run_seed_suffix <> proposer_suffix <> scorer_suffix <> continuation_suffix <> "}"
+      run_seed_suffix <>
+      proposer_suffix <> scorer_suffix <> continuation_suffix <> env_kwargs_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -334,6 +362,16 @@ defmodule Server.EnvPolicy.ConfigSig do
   end
 
   defp canonical_continuation(_), do: nil
+
+  # String-key the kwargs and float-normalize numbers so e.g. 0.1 and
+  # 0.10 (or atom vs string keys) collapse to one lineage.
+  defp canonical_env_kwargs(%{} = kw) when map_size(kw) > 0 do
+    Map.new(kw, fn {k, v} ->
+      {to_string(k), if(is_number(v), do: v * 1.0, else: v)}
+    end)
+  end
+
+  defp canonical_env_kwargs(_), do: nil
 
   defp canonical_int(n) when is_integer(n), do: n
   defp canonical_int(n) when is_float(n), do: trunc(n)
