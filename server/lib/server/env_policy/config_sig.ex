@@ -110,7 +110,12 @@ defmodule Server.EnvPolicy.ConfigSig do
     # runs under different reward definitions are different experiments
     # that must NOT inherit each other's commits. Forked backward-
     # compatibly in `stable_encode/1`: the default (nil) is omitted.
-    "env_kwargs" => nil
+    "env_kwargs" => nil,
+    # Commit acceptance order: "episode" (greedy return monotonicity)
+    # vs "successor" (coinductive dominance). Different acceptance
+    # orders accept different commit sequences — separate lineages.
+    # Forked backward-compatibly: the default ("episode") is omitted.
+    "commit_gate" => "episode"
   }
 
   @feature_canonical %{
@@ -168,6 +173,9 @@ defmodule Server.EnvPolicy.ConfigSig do
     env_kwargs_raw =
       Map.get(config, "env_kwargs", Map.get(config, :env_kwargs, @defaults["env_kwargs"]))
 
+    commit_gate_raw =
+      Map.get(config, "commit_gate", Map.get(config, :commit_gate, @defaults["commit_gate"]))
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
@@ -175,6 +183,7 @@ defmodule Server.EnvPolicy.ConfigSig do
     |> Map.put("scorer", canonical_scorer(scorer_raw))
     |> Map.put("successor_continuation", canonical_continuation(continuation_raw))
     |> Map.put("env_kwargs", canonical_env_kwargs(env_kwargs_raw))
+    |> Map.put("commit_gate", canonical_commit_gate(commit_gate_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -298,11 +307,18 @@ defmodule Server.EnvPolicy.ConfigSig do
           ""
       end
 
+    commit_gate_suffix =
+      case Map.get(map, "commit_gate", "episode") do
+        g when g in [nil, "episode"] -> ""
+        g -> ",\"commit_gate\":" <> Jason.encode!(g)
+      end
+
     "{" <>
       body <>
       verifier_suffix <>
       run_seed_suffix <>
-      proposer_suffix <> scorer_suffix <> continuation_suffix <> env_kwargs_suffix <> "}"
+      proposer_suffix <>
+      scorer_suffix <> continuation_suffix <> env_kwargs_suffix <> commit_gate_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -372,6 +388,9 @@ defmodule Server.EnvPolicy.ConfigSig do
   end
 
   defp canonical_env_kwargs(_), do: nil
+
+  defp canonical_commit_gate(g) when g in ["successor", :successor], do: "successor"
+  defp canonical_commit_gate(_), do: "episode"
 
   defp canonical_int(n) when is_integer(n), do: n
   defp canonical_int(n) when is_float(n), do: trunc(n)

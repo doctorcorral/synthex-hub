@@ -396,6 +396,7 @@ defmodule Server.Workers.ExperimentBootstrap do
           v when is_number(v) -> v * 1.0
           _ -> 0.0
         end,
+      commit_gate: Map.get(config, "commit_gate", "episode"),
       run_seed: get_int(config, "run_seed", 0)
     ]
   end
