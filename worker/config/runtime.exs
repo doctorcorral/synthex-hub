@@ -37,7 +37,7 @@ oracle_script =
 # mujoco_warp (it can't run it), and the chosen ORACLE_SCRIPT must
 # actually implement every adapter listed here.
 #
-# Default: "mujoco,mujoco_shaped". "mujoco_shaped" is the SAME CPU
+# Default: "mujoco,mujoco_shaped,mujoco_unfold". "mujoco_shaped" is the SAME CPU
 # oracle — the tag marks worker-code freshness, not different physics.
 # It routes experiments that depend on recent oracle behavior
 # (env_kwargs-bearing env_specs, the rollout TimeLimit fix,
@@ -49,10 +49,10 @@ oracle_script =
 capabilities =
   case System.get_env("WORKER_CAPABILITIES") do
     nil ->
-      ["mujoco", "mujoco_shaped"]
+      ["mujoco", "mujoco_shaped", "mujoco_unfold"]
 
     "" ->
-      ["mujoco", "mujoco_shaped"]
+      ["mujoco", "mujoco_shaped", "mujoco_unfold"]
 
     csv ->
       csv
@@ -60,7 +60,7 @@ capabilities =
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
       |> case do
-        [] -> ["mujoco", "mujoco_shaped"]
+        [] -> ["mujoco", "mujoco_shaped", "mujoco_unfold"]
         list -> list
       end
   end

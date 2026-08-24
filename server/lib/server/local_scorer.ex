@@ -252,6 +252,52 @@ defmodule Server.LocalScorer do
     end
   end
 
+  defp dispatch(%{"cmd" => "successor_unfolding"} = request, state) do
+    snapshots = request["snapshots"] || []
+
+    if snapshots == [] do
+      {:error, "successor_unfolding: payload[\"snapshots\"] must be non-empty"}
+    else
+      batch_name = "#{state.batch_prefix}-succ-unfold#{request["target_bit"]}"
+
+      payload =
+        request
+        |> Map.put("name", batch_name)
+        |> Map.put("cmd", "successor_unfolding")
+        |> Map.put("chunk_size", state.collect_chunk_size)
+        |> Map.put("candidates", snapshots)
+        |> Map.delete("snapshots")
+        |> Map.put("adapter", state.adapter)
+        |> maybe_put_experiment_id(state.experiment_id)
+
+      case Queue.submit_batch(payload, submitter: state.submitter) do
+        {:ok, batch} ->
+          Logger.info(
+            "[LocalScorer] successor_unfolding batch #{batch.id}: " <>
+              "#{batch.total_chunks} chunks, #{length(snapshots)} snapshots, " <>
+              "bit=#{request["target_bit"]}"
+          )
+
+          case await_batch_items(batch.id, state) do
+            {:ok, items} ->
+              {:ok,
+               %{
+                 "candidate_values" =>
+                   Enum.map(items, fn item -> Map.get(item, "candidate_value", 0.0) end),
+                 "incumbent_values" =>
+                   Enum.map(items, fn item -> Map.get(item, "incumbent_value", 0.0) end)
+               }}
+
+            {:error, _} = err ->
+              err
+          end
+
+        {:error, reason} ->
+          {:error, "submit_batch failed: #{inspect(reason)}"}
+      end
+    end
+  end
+
   defp dispatch(%{"cmd" => "eval_regret"} = request, state) do
     seeds = request["seeds"] || []
 

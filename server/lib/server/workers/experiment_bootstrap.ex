@@ -285,8 +285,10 @@ defmodule Server.Workers.ExperimentBootstrap do
   # Walker2d healthy_reward=0); the distinct tag routes those chunks
   # ONLY to workers rebuilt with the new table, so one experiment is
   # never scored under two different reward definitions by a mixed
-  # fleet.
-  @cpu_successor_adapters ["mujoco", "mujoco_shaped"]
+  # fleet. "mujoco_unfold" likewise routes only to workers whose
+  # oracle knows the successor_unfolding command (CSHRL-faithful
+  # commit gate) — older workers would reject the job type.
+  @cpu_successor_adapters ["mujoco", "mujoco_shaped", "mujoco_unfold"]
 
   defp validate_fitness_scorer!(config) do
     scorer = Map.get(config, "scorer") || Map.get(config, :scorer) || "episode"

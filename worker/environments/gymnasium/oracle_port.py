@@ -560,11 +560,81 @@ def handle_successor_advantages(job):
     return results
 
 
+def _unfold_from_snapshot(env, snap, bit_preds, lookahead, cfg, bits_per_dim):
+    # Coinductive unfolding: the policy's own successor stream from the
+    # snapshot. No forced first action, no external continuation — every
+    # action (including the first) comes from `bit_preds` itself. Steps
+    # the unwrapped env for the same TimeLimit reason as _lookahead_value.
+    raw = env.unwrapped
+    raw.set_state(np.array(snap["qpos"], dtype=np.float64),
+                  np.array(snap["qvel"], dtype=np.float64))
+    obs = np.asarray(snap["obs"], dtype=np.float64)
+    total = 0.0
+    for _ in range(max(lookahead, 1)):
+        action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+        obs, r, term, trunc, _ = raw.step(action)
+        total += float(r)
+        if term or trunc:
+            break
+    return total
+
+
+def handle_successor_unfolding(job):
+    # CSHRL-faithful commit verification: compare the CANDIDATE policy's
+    # own unfolding (candidate predicate substituted at target_bit and
+    # applied at EVERY step) against the incumbent's unfolding, from the
+    # same snapshots. Unlike successor_advantages — a one-step deviation
+    # under a shared continuation (Bellman machinery, cheap because it is
+    # candidate-independent) — this is the successor object the theory
+    # actually compares: each policy generates its own continuation, so
+    # no V^pi blindness and no external reference stream to Goodhart.
+    env_name = job["env_name"]
+    cfg = resolve_cfg(job)
+
+    snapshots = job.get("snapshots") or job.get("candidates") or []
+    bit_preds = job.get("bit_predicates", [])
+    candidate = job["candidate_predicate"]
+    target_bit = int(job["target_bit"])
+    lookahead = int(job.get("lookahead", 1000))
+    bits_per_dim = int(job.get("bits_per_dim", 3))
+
+    cand_preds = list(bit_preds)
+    cand_preds[target_bit] = candidate
+
+    env_kwargs = cfg.get("env_kwargs", {})
+    env = gym.make(env_name, **env_kwargs)
+    results = []
+    try:
+        env.reset()
+        for i, snap in enumerate(snapshots):
+            try:
+                if snap.get("qpos") is None or snap.get("qvel") is None:
+                    results.append({"idx": i, "candidate_value": 0.0,
+                                    "incumbent_value": 0.0,
+                                    "error": "snapshot missing sim state"})
+                    continue
+                v_inc = _unfold_from_snapshot(env, snap, bit_preds, lookahead,
+                                              cfg, bits_per_dim)
+                v_cand = _unfold_from_snapshot(env, snap, cand_preds, lookahead,
+                                               cfg, bits_per_dim)
+                results.append({"idx": i, "candidate_value": float(v_cand),
+                                "incumbent_value": float(v_inc)})
+            except Exception as e:
+                log.exception("successor_unfolding snapshot %d failed", i)
+                results.append({"idx": i, "candidate_value": 0.0,
+                                "incumbent_value": 0.0,
+                                "error": f"{type(e).__name__}: {e}"})
+    finally:
+        env.close()
+    return results
+
+
 COMMANDS = {
     "score_bit": handle_score_bit,
     "collect_states": handle_collect_states,
     "eval_regret": handle_eval_regret,
     "successor_advantages": handle_successor_advantages,
+    "successor_unfolding": handle_successor_unfolding,
 }
 
 

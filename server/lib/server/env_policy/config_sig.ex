@@ -390,6 +390,7 @@ defmodule Server.EnvPolicy.ConfigSig do
   defp canonical_env_kwargs(_), do: nil
 
   defp canonical_commit_gate(g) when g in ["successor", :successor], do: "successor"
+  defp canonical_commit_gate(g) when g in ["unfolding", :unfolding], do: "unfolding"
   defp canonical_commit_gate(_), do: "episode"
 
   defp canonical_int(n) when is_integer(n), do: n
