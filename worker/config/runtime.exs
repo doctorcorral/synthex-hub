@@ -49,10 +49,10 @@ oracle_script =
 capabilities =
   case System.get_env("WORKER_CAPABILITIES") do
     nil ->
-      ["mujoco", "mujoco_shaped", "mujoco_unfold"]
+      ["mujoco", "mujoco_shaped", "mujoco_unfold", "mujoco_aug"]
 
     "" ->
-      ["mujoco", "mujoco_shaped", "mujoco_unfold"]
+      ["mujoco", "mujoco_shaped", "mujoco_unfold", "mujoco_aug"]
 
     csv ->
       csv
@@ -60,7 +60,7 @@ capabilities =
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
       |> case do
-        [] -> ["mujoco", "mujoco_shaped", "mujoco_unfold"]
+        [] -> ["mujoco", "mujoco_shaped", "mujoco_unfold", "mujoco_aug"]
         list -> list
       end
   end

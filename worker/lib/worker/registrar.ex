@@ -91,7 +91,7 @@ defmodule Worker.Registrar do
   defp capabilities do
     case Application.get_env(:worker, :capabilities) do
       list when is_list(list) and list != [] -> Enum.map(list, &to_string/1)
-      _ -> ["mujoco", "mujoco_shaped", "mujoco_unfold"]
+      _ -> ["mujoco", "mujoco_shaped", "mujoco_unfold", "mujoco_aug"]
     end
   end
 end

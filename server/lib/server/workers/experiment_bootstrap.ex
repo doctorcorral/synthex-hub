@@ -288,7 +288,10 @@ defmodule Server.Workers.ExperimentBootstrap do
   # fleet. "mujoco_unfold" likewise routes only to workers whose
   # oracle knows the successor_unfolding command (CSHRL-faithful
   # commit gate) — older workers would reject the job type.
-  @cpu_successor_adapters ["mujoco", "mujoco_shaped", "mujoco_unfold"]
+  # "mujoco_aug" additionally requires obs_augmentation support
+  # (markovized observation views); older oracles would index past
+  # the raw observation and crash.
+  @cpu_successor_adapters ["mujoco", "mujoco_shaped", "mujoco_unfold", "mujoco_aug"]
 
   defp validate_fitness_scorer!(config) do
     scorer = Map.get(config, "scorer") || Map.get(config, :scorer) || "episode"
@@ -399,6 +402,11 @@ defmodule Server.Workers.ExperimentBootstrap do
           _ -> 0.0
         end,
       commit_gate: Map.get(config, "commit_gate", "episode"),
+      obs_augmentation:
+        case Map.get(config, "obs_augmentation") do
+          aug when is_map(aug) and map_size(aug) > 0 -> aug
+          _ -> nil
+        end,
       run_seed: get_int(config, "run_seed", 0)
     ]
   end

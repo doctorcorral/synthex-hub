@@ -16,6 +16,7 @@ Future commands map onto the same protocol; just add a dispatch case.
 
 import json
 import logging
+import math
 import os
 import sys
 import traceback
@@ -117,6 +118,7 @@ def resolve_cfg(job):
             # only affects the secondary landings metric, not the reward.
             "success_threshold": float(spec.get("success_threshold", float("inf"))),
             "env_kwargs": spec.get("env_kwargs") or {},
+            "obs_augmentation": spec.get("obs_augmentation"),
         }
 
     if env_name in ENV_CONFIGS:
@@ -178,6 +180,88 @@ def bit_policy_action(bit_preds, obs, cfg, bits_per_dim):
     return action_from_bits(bits, cfg, bits_per_dim)
 
 
+# ── Observation augmentation ("markovization") ──────────────────────
+#
+# Append-only extension of the observation the PREDICATES see (the env
+# physics is untouched): k stacked previous raw observations, the last
+# continuous action, and sin/cos step-clocks. The raw dims keep their
+# indices, so policies synthesized without augmentation transplant
+# unchanged. This buys the memoryless predicate class internal state —
+# prev-action feedback makes the bit-policy a finite automaton over its
+# own outputs (hysteresis/latching), and clocks expose stride phase —
+# without new feature kernels.
+#
+# Spec rides in env_spec: {"prev_obs": k, "prev_action": bool,
+# "clock": [period_steps, ...]}; view layout is
+#   [obs_t | obs_{t-1} ... obs_{t-k} | a_{t-1} | sin/cos per period].
+
+
+class ObsAug:
+    def __init__(self, spec, n_action_dims):
+        spec = spec if isinstance(spec, dict) else {}
+        self.k = max(0, int(spec.get("prev_obs") or 0))
+        self.use_prev_action = bool(spec.get("prev_action", False))
+        self.clock = [int(p) for p in (spec.get("clock") or []) if int(p) > 0]
+        self.n_act = int(n_action_dims)
+        self.enabled = self.k > 0 or self.use_prev_action or bool(self.clock)
+
+    def extra_dims(self, n_obs_dims):
+        return self.k * n_obs_dims \
+            + (self.n_act if self.use_prev_action else 0) \
+            + 2 * len(self.clock)
+
+    def reset(self, obs):
+        return {"prev_obs": [list(obs)] * self.k,
+                "prev_action": [0.0] * self.n_act,
+                "t": 0}
+
+    def restore(self, snap_aug, obs):
+        """Aug state stored in a snapshot; falls back to reset-like state."""
+        if not isinstance(snap_aug, dict):
+            return self.reset(obs)
+        st = self.reset(obs)
+        po = snap_aug.get("prev_obs")
+        if self.k and isinstance(po, list) and len(po) == self.k:
+            st["prev_obs"] = [list(p) for p in po]
+        pa = snap_aug.get("prev_action")
+        if isinstance(pa, list) and len(pa) == self.n_act:
+            st["prev_action"] = [float(a) for a in pa]
+        st["t"] = int(snap_aug.get("t") or 0)
+        return st
+
+    def view(self, obs, st):
+        if not self.enabled:
+            return list(obs)
+        out = list(obs)
+        for po in st["prev_obs"]:
+            out += po
+        if self.use_prev_action:
+            out += st["prev_action"]
+        for period in self.clock:
+            ph = 2.0 * math.pi * st["t"] / period
+            out += [math.sin(ph), math.cos(ph)]
+        return out
+
+    def advance(self, st, obs_before, action):
+        """Update after env.step: obs_before is the pre-step raw obs."""
+        if not self.enabled:
+            return
+        if self.k:
+            st["prev_obs"] = [list(obs_before)] + st["prev_obs"][:self.k - 1]
+        if self.use_prev_action:
+            st["prev_action"] = [float(a) for a in np.asarray(action).ravel()]
+        st["t"] += 1
+
+    def serialize(self, st):
+        return {"prev_obs": st["prev_obs"],
+                "prev_action": st["prev_action"],
+                "t": st["t"]}
+
+
+def make_aug(cfg):
+    return ObsAug(cfg.get("obs_augmentation"), cfg["n_action_dims"])
+
+
 def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, max_steps,
                         bits_per_dim, want_per_seed=False):
     test_preds = list(bit_preds)
@@ -190,15 +274,19 @@ def score_bit_candidate(env_name, cfg, candidate, bit_preds, target_bit, seeds, 
     # n_seeds for no use.
     per_seed = [] if want_per_seed else None
     env_kwargs = cfg.get("env_kwargs", {})
+    aug = make_aug(cfg)
 
     for seed in seeds:
         env = gym.make(env_name, **env_kwargs)
         try:
             obs, _ = env.reset(seed=int(seed))
+            ast = aug.reset(obs.tolist())
             ep_r = 0.0
             for _ in range(max_steps):
-                action = bit_policy_action(test_preds, obs.tolist(), cfg, bits_per_dim)
+                prev = obs.tolist()
+                action = bit_policy_action(test_preds, aug.view(prev, ast), cfg, bits_per_dim)
                 obs, r, term, trunc, _ = env.step(action)
+                aug.advance(ast, prev, action)
                 ep_r += float(r)
                 if term or trunc:
                     break
@@ -272,25 +360,35 @@ def collect_states_one(env_name, cfg, seed, bit_preds, max_steps, bits_per_dim, 
     qvel in that case and the master must not enable successor fitness.
     """
     env_kwargs = cfg.get("env_kwargs", {})
+    aug = make_aug(cfg)
     env = gym.make(env_name, **env_kwargs)
     snapshots = []
     try:
         obs, _ = env.reset(seed=int(seed))
+        ast = aug.reset(obs.tolist())
         states = []
         ep_r = 0.0
         for step in range(max_steps):
             if step % stride == 0:
                 obs_list = obs.tolist()
-                states.append(obs_list)
+                # States feed engine-side feature generation, so record
+                # the AUGMENTED view — thresholds/pockets must be placed
+                # in the same space the predicates will be evaluated in.
+                states.append(aug.view(obs_list, ast))
                 if want_sim_state:
                     snap = {"obs": obs_list}
+                    if aug.enabled:
+                        snap["obs_aug"] = aug.view(obs_list, ast)
+                        snap["aug"] = aug.serialize(ast)
                     u = env.unwrapped
                     if hasattr(u, "set_state") and hasattr(getattr(u, "data", None), "qpos"):
                         snap["qpos"] = u.data.qpos.copy().tolist()
                         snap["qvel"] = u.data.qvel.copy().tolist()
                         snapshots.append(snap)
-            action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+            prev = obs.tolist()
+            action = bit_policy_action(bit_preds, aug.view(prev, ast), cfg, bits_per_dim)
             obs, r, term, trunc, _ = env.step(action)
+            aug.advance(ast, prev, action)
             ep_r += float(r)
             if term or trunc:
                 break
@@ -353,17 +451,21 @@ def handle_collect_states(job):
 
 def _rollout_first_action(env_name, cfg, bit_preds, seed, first_action, horizon, bits_per_dim):
     env_kwargs = cfg.get("env_kwargs", {})
+    aug = make_aug(cfg)
     env = gym.make(env_name, **env_kwargs)
     try:
-        env.reset(seed=int(seed))
+        obs, _ = env.reset(seed=int(seed))
+        ast = aug.reset(obs.tolist())
         total = 0.0
         action = first_action
         for _ in range(horizon):
+            prev = obs.tolist()
             obs, r, term, trunc, _ = env.step(action)
+            aug.advance(ast, prev, action)
             total += float(r)
             if term or trunc:
                 break
-            action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+            action = bit_policy_action(bit_preds, aug.view(obs.tolist(), ast), cfg, bits_per_dim)
         return total
     finally:
         env.close()
@@ -371,13 +473,14 @@ def _rollout_first_action(env_name, cfg, bit_preds, seed, first_action, horizon,
 
 def eval_regret_one(env_name, cfg, seed, bit_preds, horizon, bits_per_dim):
     env_kwargs = cfg.get("env_kwargs", {})
+    aug = make_aug(cfg)
     env = gym.make(env_name, **env_kwargs)
     try:
         obs0, _ = env.reset(seed=int(seed))
     finally:
         env.close()
 
-    obs0_list = obs0.tolist()
+    obs0_list = aug.view(obs0.tolist(), aug.reset(obs0.tolist()))
     bits = [1 if eval_pred(p, obs0_list) else 0 for p in bit_preds]
 
     a_pi = action_from_bits(bits, cfg, bits_per_dim)
@@ -444,7 +547,7 @@ def handle_eval_regret(job):
 
 
 def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_per_dim,
-                     continuation=None):
+                     continuation=None, aug=None, aug_state=None, obs0=None):
     # Step the *unwrapped* env. The TimeLimit wrapper accumulates steps
     # across the two counterfactual branches scored per snapshot (v0 then
     # v1), so at full-horizon lookaheads (>= max_episode_steps) the second
@@ -465,7 +568,13 @@ def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_pe
     raw = env.unwrapped
     raw.set_state(np.array(qpos, dtype=np.float64),
                   np.array(qvel, dtype=np.float64))
+    if aug is None:
+        aug = ObsAug(None, cfg["n_action_dims"])
+    ast = dict(aug_state) if aug_state is not None else aug.reset(obs0 or [])
+    prev = list(obs0) if obs0 is not None else None
     obs, r, term, trunc, _ = raw.step(action)
+    if aug.enabled and prev is not None:
+        aug.advance(ast, prev, action)
     total = float(r)
     if term or trunc:
         return total
@@ -479,8 +588,10 @@ def _lookahead_value(env, qpos, qvel, action, bit_preds, lookahead, cfg, bits_pe
         if cyc is not None:
             action = cyc[(t // hold) % len(cyc)]
         else:
-            action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+            action = bit_policy_action(bit_preds, aug.view(obs.tolist(), ast), cfg, bits_per_dim)
+        prev = obs.tolist()
         obs, r, term, trunc, _ = raw.step(action)
+        aug.advance(ast, prev, action)
         total += float(r)
         if term or trunc:
             break
@@ -495,7 +606,11 @@ def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, l
     if qpos is None or qvel is None:
         return 0.0
 
-    base_bits = [1 if eval_pred(p, obs) else 0 for p in bit_preds]
+    aug = make_aug(cfg)
+    ast = aug.restore(snapshot.get("aug"), obs)
+    obs_view = aug.view(obs, ast)
+
+    base_bits = [1 if eval_pred(p, obs_view) else 0 for p in bit_preds]
     b0, b1 = list(base_bits), list(base_bits)
     b0[target_bit] = 0
     b1[target_bit] = 1
@@ -507,9 +622,9 @@ def snapshot_advantage_rollout(env_name, cfg, snapshot, bit_preds, target_bit, l
     try:
         env.reset()
         v0 = _lookahead_value(env, qpos, qvel, a0, bit_preds, lookahead, cfg, bits_per_dim,
-                              continuation=continuation)
+                              continuation=continuation, aug=aug, aug_state=ast, obs0=obs)
         v1 = _lookahead_value(env, qpos, qvel, a1, bit_preds, lookahead, cfg, bits_per_dim,
-                              continuation=continuation)
+                              continuation=continuation, aug=aug, aug_state=ast, obs0=obs)
         return v1 - v0
     finally:
         env.close()
@@ -560,7 +675,7 @@ def handle_successor_advantages(job):
     return results
 
 
-def _unfold_from_snapshot(env, snap, bit_preds, lookahead, cfg, bits_per_dim):
+def _unfold_from_snapshot(env, snap, bit_preds, lookahead, cfg, bits_per_dim, aug=None):
     # Coinductive unfolding: the policy's own successor stream from the
     # snapshot. No forced first action, no external continuation — every
     # action (including the first) comes from `bit_preds` itself. Steps
@@ -569,10 +684,15 @@ def _unfold_from_snapshot(env, snap, bit_preds, lookahead, cfg, bits_per_dim):
     raw.set_state(np.array(snap["qpos"], dtype=np.float64),
                   np.array(snap["qvel"], dtype=np.float64))
     obs = np.asarray(snap["obs"], dtype=np.float64)
+    if aug is None:
+        aug = make_aug(cfg)
+    ast = aug.restore(snap.get("aug"), obs.tolist())
     total = 0.0
     for _ in range(max(lookahead, 1)):
-        action = bit_policy_action(bit_preds, obs.tolist(), cfg, bits_per_dim)
+        prev = obs.tolist()
+        action = bit_policy_action(bit_preds, aug.view(prev, ast), cfg, bits_per_dim)
         obs, r, term, trunc, _ = raw.step(action)
+        aug.advance(ast, prev, action)
         total += float(r)
         if term or trunc:
             break

@@ -115,7 +115,11 @@ defmodule Server.EnvPolicy.ConfigSig do
     # vs "successor" (coinductive dominance). Different acceptance
     # orders accept different commit sequences — separate lineages.
     # Forked backward-compatibly: the default ("episode") is omitted.
-    "commit_gate" => "episode"
+    "commit_gate" => "episode",
+    # Observation augmentation (markovization): policies over different
+    # observation spaces are incomparable — separate lineages. Forked
+    # backward-compatibly: the default (nil) is omitted.
+    "obs_augmentation" => nil
   }
 
   @feature_canonical %{
@@ -176,6 +180,13 @@ defmodule Server.EnvPolicy.ConfigSig do
     commit_gate_raw =
       Map.get(config, "commit_gate", Map.get(config, :commit_gate, @defaults["commit_gate"]))
 
+    obs_aug_raw =
+      Map.get(
+        config,
+        "obs_augmentation",
+        Map.get(config, :obs_augmentation, @defaults["obs_augmentation"])
+      )
+
     base
     |> Map.put("verifier", canonical_verifier(verifier_raw))
     |> Map.put("run_seed", canonical_run_seed(run_seed_raw))
@@ -184,6 +195,7 @@ defmodule Server.EnvPolicy.ConfigSig do
     |> Map.put("successor_continuation", canonical_continuation(continuation_raw))
     |> Map.put("env_kwargs", canonical_env_kwargs(env_kwargs_raw))
     |> Map.put("commit_gate", canonical_commit_gate(commit_gate_raw))
+    |> Map.put("obs_augmentation", canonical_obs_aug(obs_aug_raw))
   end
 
   def canonicalize(_), do: canonicalize(%{})
@@ -313,12 +325,29 @@ defmodule Server.EnvPolicy.ConfigSig do
         g -> ",\"commit_gate\":" <> Jason.encode!(g)
       end
 
+    obs_aug_suffix =
+      case Map.get(map, "obs_augmentation") do
+        aug when is_map(aug) and map_size(aug) > 0 ->
+          encoded =
+            aug
+            |> Enum.sort_by(fn {k, _} -> k end)
+            |> Enum.map(fn {k, v} -> Jason.encode!(k) <> ":" <> Jason.encode!(v) end)
+            |> Enum.join(",")
+
+          ",\"obs_augmentation\":{" <> encoded <> "}"
+
+        _ ->
+          ""
+      end
+
     "{" <>
       body <>
       verifier_suffix <>
       run_seed_suffix <>
       proposer_suffix <>
-      scorer_suffix <> continuation_suffix <> env_kwargs_suffix <> commit_gate_suffix <> "}"
+      scorer_suffix <>
+      continuation_suffix <>
+      env_kwargs_suffix <> commit_gate_suffix <> obs_aug_suffix <> "}"
   end
 
   # `nil` is a valid value (means "use Synthex's default feature set"
@@ -392,6 +421,45 @@ defmodule Server.EnvPolicy.ConfigSig do
   defp canonical_commit_gate(g) when g in ["successor", :successor], do: "successor"
   defp canonical_commit_gate(g) when g in ["unfolding", :unfolding], do: "unfolding"
   defp canonical_commit_gate(_), do: "episode"
+
+  # String-key and normalize the augmentation spec: prev_obs to int,
+  # prev_action to bool, clock to a list of ints (order preserved —
+  # it determines appended dim order). Empty/degenerate specs collapse
+  # to nil so `{}` hashes identically to absent.
+  defp canonical_obs_aug(aug) when is_map(aug) do
+    k =
+      case Map.get(aug, "prev_obs", Map.get(aug, :prev_obs)) do
+        n when is_integer(n) and n > 0 -> n
+        n when is_float(n) and n >= 1 -> trunc(n)
+        _ -> 0
+      end
+
+    pa = Map.get(aug, "prev_action", Map.get(aug, :prev_action)) in [true, "true"]
+
+    clock =
+      case Map.get(aug, "clock", Map.get(aug, :clock)) do
+        l when is_list(l) ->
+          l
+          |> Enum.map(fn
+            p when is_integer(p) -> p
+            p when is_float(p) -> trunc(p)
+            _ -> 0
+          end)
+          |> Enum.filter(&(&1 > 0))
+
+        _ ->
+          []
+      end
+
+    out = %{}
+    out = if k > 0, do: Map.put(out, "prev_obs", k), else: out
+    out = if pa, do: Map.put(out, "prev_action", true), else: out
+    out = if clock != [], do: Map.put(out, "clock", clock), else: out
+
+    if map_size(out) > 0, do: out, else: nil
+  end
+
+  defp canonical_obs_aug(_), do: nil
 
   defp canonical_int(n) when is_integer(n), do: n
   defp canonical_int(n) when is_float(n), do: trunc(n)
