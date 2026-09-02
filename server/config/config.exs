@@ -32,11 +32,14 @@ config :server, Oban,
     # chunk rows have no value after that — they're pure bloat that
     # slows every COUNT(available)/claim SKIP LOCKED/insert against the
     # table (the contention behind the 57014 statement timeouts). With
-    # the per-bit pool now bounded (synthex `max_candidates`), chunk
-    # churn is far lower, but short retention compounds the win. 3h
-    # (was 24h) keeps a generous margin for a slow controller to fetch
-    # results while keeping the table small.
-    {Oban.Plugins.Pruner, max_age: 60 * 60 * 3},
+    # full-episode successor batches (927 chunks × ~200KB snapshot
+    # args, two concurrent walker runs) even 3h of retention bloated
+    # oban_jobs to ~3GB — the table Postgres must index-insert on
+    # every submit — and 500-row chunk inserts started timing out at
+    # 60s, failing whole batches at submit. Results are consumed
+    # within seconds of batch completion (and persisted separately in
+    # chunk_results for 6h), so 15min retention is still generous.
+    {Oban.Plugins.Pruner, max_age: 60 * 15},
     {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(5)},
     {Oban.Plugins.Cron, crontab: [
       {"*/5 * * * *", Server.Jobs.ReapWorkers},
