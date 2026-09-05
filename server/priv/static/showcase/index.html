@@ -251,6 +251,81 @@
                 </div>
             </section>
 
+            <!-- Walker2d (CSHRL unfolding gate, raw reward, stateful policy) -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo Walker2d-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~1580</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 17D + history/clock</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 6D (18 bits)</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Coinductive Unfolding Gate</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/walker2d.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/walker2d.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto no-expand" onclick="event.stopPropagation()">
+                    <p class="text-gray-300 text-sm mb-3">
+                        Raw reward — no shaping. Walker2d's standing trap (~940/ep for doing
+                        nothing) defeats greedy hill-climbing; here each commit was accepted only if the
+                        <strong>candidate policy's own coinductive unfolding</strong> dominated the
+                        incumbent's from shared snapshots. The first <em>stateful</em> showcase policy:
+                        predicates read the previous observation, previous action, and gait-clock phases.
+                    </p>
+                    <div class="overflow-x-auto">
+                    <pre><code class="language-python">def policy(obs, prev_obs, prev_act, t):
+    # Augmented view (46D): current obs (17D) + previous obs (17D)
+    # + previous action (6D) + gait clocks sin/cos of periods 10/20/40.
+    v = list(obs) + list(prev_obs) + list(prev_act)
+    for T in (10, 20, 40):
+        v += [sin(2*pi*t/T), cos(2*pi*t/T)]
+    ricker = lambda x, b, a: (1 - ((x-b)/a)**2) * exp(-((x-b)/a)**2 / 2)
+
+    bits = [0] * 18
+
+    # thigh_R
+    if ((v[15] < -0.6737) or (-1.214 <= v[34] < -0.2143)) or (2*v[0] + v[10] < 0): bits[0] = 1
+    if (v[40] < -0.2939) and (v[41] < 0): bits[1] = 1
+    if (v[40] < -0.2939) or not (v[40] < 0.7694): bits[2] = 1
+
+    # leg_R
+    if (ricker(v[17], 1.171, 0.03627) < 0.8) and (-2*v[5] + 1*v[11] + v[6] < 0): bits[3] = 1
+    if v[40] < -0.2939: bits[4] = 1
+    if not (v[40] < -0.2939) or (v[41] < 0): bits[5] = 1
+
+    # foot_R
+    if (v[40] < -0.2939) or (v[41] < -0.559): bits[6] = 1
+    if (v[40] < -0.2939) or (v[41] < 0.559): bits[7] = 1
+    if v[40] < 0.7694: bits[8] = 1
+
+    # thigh_L
+    if (ricker(v[11], 0.4293, 5) < 0.8) and (cos(v[21]) < 0.9): bits[9] = 1
+    if (v[40] < -0.2939) or not (v[41] < 0.559): bits[10] = 1
+    if (v[40] < -0.2939) or not (v[41] < 0.559): bits[11] = 1
+
+    # leg_L
+    if not (v[40] < 0.7694): bits[12] = 1
+    if not (v[40] < -0.2939) and (v[40] < 0.7694): bits[13] = 1
+    if (v[40] < -0.2939) or not (v[41] < -0.559): bits[14] = 1
+
+    # foot_L
+    if v[40] < 0.7694: bits[15] = 1
+    if not (v[40] < -0.2939) and (v[40] < 0.7694): bits[16] = 1
+    if not (v[40] < 0.7694) or not (v[41] < 0): bits[17] = 1
+
+    weights = [1, 2, 4]
+    actions = [0.0] * 6
+    for d in range(6):
+        s = sum(weights[i] * bits[d*3+i] for i in range(3))
+        actions[d] = -1.0 + 2.0 * s / 7
+    return actions</code></pre>
+                    </div>
+                </div>
+            </section>
+
             <!-- Swimmer -->
             <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
                 <div>
