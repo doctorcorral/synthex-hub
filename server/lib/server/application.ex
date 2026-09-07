@@ -6,6 +6,13 @@ defmodule Server.Application do
   def start(_type, _args) do
     port = Application.get_env(:server, :port, 4000)
 
+    # Read-through cache for batch-wide worker params (see
+    # Server.Queue.batch_params/1). Owned here so it outlives the
+    # short-lived request processes that populate it.
+    :ets.new(Server.Queue.batch_params_cache_name(),
+      [:named_table, :public, :set, read_concurrency: true]
+    )
+
     children = [
       Server.Repo,
       {Oban, Application.fetch_env!(:server, Oban)},

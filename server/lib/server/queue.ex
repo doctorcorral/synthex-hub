@@ -196,8 +196,6 @@ defmodule Server.Queue do
   end
 
   defp stream_insert_chunks(%Batch{} = batch, candidates, chunk_size, payload) do
-    params = Map.drop(payload, ["candidates", "chunk_size", "name"])
-
     # Routing tag: which physics adapter a worker must have to run
     # this chunk. Defaults to "mujoco" so every batch submitted by
     # a master that doesn't set it (i.e. all of them today) keeps
@@ -218,6 +216,14 @@ defmodule Server.Queue do
           Enum.map(group, fn {chunk, idx} ->
             chunk_id = "#{batch.id}_chunk_#{idx}"
 
+            # NOTE: batch-wide `params` (env_spec, bit_predicates, seed
+            # vectors, ...) are deliberately NOT stamped into each chunk
+            # row. Duplicating them ~1000x per batch is what bloated
+            # oban_jobs to GBs (2.9GB on the Walker2d unfolding runs,
+            # 354MB within a day of the 24-bit run), outran autovacuum,
+            # and made 500-row chunk inserts time out — failing whole
+            # batches at submit. They live once on `batches.payload`
+            # and are re-attached at claim time (`batch_params/1`).
             args = %{
               "chunk_id" => chunk_id,
               "batch_id" => batch.id,
@@ -225,8 +231,7 @@ defmodule Server.Queue do
               "cmd" => batch.cmd,
               "env_name" => batch.env_name,
               "adapter" => adapter,
-              "candidates" => chunk,
-              "params" => params
+              "candidates" => chunk
             }
 
             BrokerWorker.new(args, meta: %{"chunk_id" => chunk_id, "batch_id" => batch.id})
@@ -1531,12 +1536,54 @@ defmodule Server.Queue do
   # ── Internals ───────────────────────────────────────────────
 
   defp chunk_payload_for_worker(job) do
-    Map.merge(job.args, %{
+    # Re-attach batch-wide params (stored once on batches.payload, not
+    # duplicated per chunk row — see stream_insert_chunks/4). Legacy
+    # in-flight jobs that still carry "params" keep theirs.
+    args =
+      case job.args do
+        %{"params" => _} = a -> a
+        a -> Map.put(a, "params", batch_params(a["batch_id"]))
+      end
+
+    Map.merge(args, %{
       "oban_job_id" => job.id,
       "attempt" => job.attempt,
       "max_attempts" => job.max_attempts
     })
   end
+
+  # Batch-wide worker params, cached in ETS (table owned by the
+  # application supervisor, see Server.Application). A batch's params
+  # are immutable after insert, so a plain read-through cache is safe;
+  # the size guard just bounds memory across many batches.
+  @batch_params_cache :synthex_batch_params_cache
+  def batch_params_cache_name, do: @batch_params_cache
+
+  defp batch_params(batch_id) when is_binary(batch_id) do
+    case :ets.lookup(@batch_params_cache, batch_id) do
+      [{^batch_id, params}] ->
+        params
+
+      [] ->
+        params =
+          case Repo.get(Batch, batch_id) do
+            %Batch{payload: payload} when is_map(payload) ->
+              Map.drop(payload, ["candidates", "chunk_size", "name", "n_candidates"])
+
+            _ ->
+              %{}
+          end
+
+        if :ets.info(@batch_params_cache, :size) > 200 do
+          :ets.delete_all_objects(@batch_params_cache)
+        end
+
+        :ets.insert(@batch_params_cache, {batch_id, params})
+        params
+    end
+  end
+
+  defp batch_params(_), do: %{}
 
   defp scrub_payload(payload) do
     payload
