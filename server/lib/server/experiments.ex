@@ -266,6 +266,21 @@ defmodule Server.Experiments do
     result
   end
 
+  @doc """
+  Revive a failed/stalled experiment back to `running`, clearing its
+  error and refreshing the liveness clock. Used by `OrphanReaper`'s
+  auto-resume pass when a worker capable of the experiment's adapter
+  reappears after the run was reaped for a transient stall. The caller
+  is responsible for re-enqueuing the controller job.
+  """
+  def resume(%Experiment{} = exp) do
+    update_state(exp, %{
+      "status" => "running",
+      "completed_at" => nil,
+      "error" => nil
+    })
+  end
+
   @doc "Transition an experiment to cancelled (operator-initiated)."
   def mark_cancelled(%Experiment{} = exp, reason \\ nil) do
     result =
@@ -432,6 +447,7 @@ defmodule Server.Experiments do
 
     %{
       experiment_id: exp.id,
+      submitter: exp.submitter,
       status: exp.status,
       cegar_iter: exp.current_cegar_iter,
       total_cegar_iters: cegar_rounds,

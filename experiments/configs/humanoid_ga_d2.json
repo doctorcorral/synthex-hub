@@ -1,0 +1,34 @@
+{
+  "env_key": "humanoid",
+  "env_name": "Humanoid-v5",
+  "config": {
+    "adapter": "mujoco",
+    "bits_per_dim": 3,
+    "depth": 2,
+    "max_coeff": 5,
+    "tridiag_max_coeff": 2,
+    "feature_types": ["axis", "diag", "sin_axis", "cos_axis", "tridiag"],
+    "n_episodes": 32,
+    "top_k": 12,
+    "max_iters": 1,
+    "cegar_rounds": 1,
+    "max_steps": 1000,
+    "max_candidates": 4000,
+    "chunk_size": 25,
+    "collect_states_chunk_size": 4,
+    "state_stride": 20,
+    "poll_interval_ms": 1000,
+    "verifier": "random",
+    "validation_guard": true,
+    "proposer": "ga",
+    "proposer_opts": {
+      "pop_size": 96,
+      "generations": 6,
+      "elite_frac": 0.2,
+      "tournament_k": 3,
+      "crossover_rate": 0.6,
+      "mutation_rate": 0.85,
+      "init_compose_frac": 0.5
+    }
+  }
+}

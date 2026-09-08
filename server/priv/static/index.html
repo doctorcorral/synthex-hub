@@ -323,6 +323,16 @@
       margin-top: 2px;
       font-variant-numeric: tabular-nums;
     }
+    .exp-id {
+      display: block;
+      font-weight: 400;
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--fg-faint);
+      opacity: 0.75;
+      letter-spacing: 0.01em;
+      margin-top: 2px;
+    }
     .exp-state {
       font-size: 11px; text-transform: uppercase;
       letter-spacing: 0.05em;
@@ -1415,6 +1425,18 @@ mix run experiments/humanoid/round-1.exs</code></pre>
       // don't blink empty every 15 s.
       const expId = isLive ? r.active.experiment_id : '';
 
+      // Short experiment id + submitter, so a specific run on a card is
+      // easy to reference / locate (multiple lineages per env otherwise
+      // look alike). Only shown for the live session.
+      const submitter = isLive ? (r.active.submitter || '') : '';
+      const idBadge = (isLive && expId)
+        ? '<span class="exp-id" title="experiment id ' + escapeHtml(expId) +
+            (submitter ? ' — submitter ' + escapeHtml(submitter) : '') + '">' +
+            '#' + escapeHtml(expId.slice(0, 8)) +
+            (submitter ? ' · ' + escapeHtml(submitter) : '') +
+          '</span>'
+        : '';
+
       // Policy-version badge — the lineage's monotonically-increasing
       // commit counter. Reads from `r.policy_version` (the env_policy
       // row's version, surfaced at the card level by the summary
@@ -1459,6 +1481,7 @@ mix run experiments/humanoid/round-1.exs</code></pre>
                     escapeHtml(configSummary) +
                   '</div>'
                 : '') +
+              idBadge +
               '<span class="exp-chevron" aria-hidden="true">\u203A</span>' +
             '</div>' +
             '<div class="exp-state ' + stateLabel + '">' + stateLabel + '</div>' +

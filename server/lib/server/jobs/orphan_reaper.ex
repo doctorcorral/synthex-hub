@@ -45,12 +45,90 @@ defmodule Server.Jobs.OrphanReaper do
   # past suspicious.
   @stalled_seconds 30 * 60
 
+  # Auto-resume window. A run reaped for a transient stall is revived
+  # only if it failed within this window AND a worker capable of its
+  # adapter is live again. Bounding by recency is the safety valve: it
+  # targets the "worker blipped / controller died mid-deploy" case
+  # without mass-resurrecting week-old corpses every time a GPU worker
+  # reconnects.
+  @resume_window_seconds 2 * 60 * 60
+
   @impl Oban.Worker
   def perform(_job) do
+    resume_resumable_experiments()
     reap_stalled_experiments()
     cancel_orphan_batches()
     cancel_unowned_batches()
     :ok
+  end
+
+  # Revive experiments the reaper previously failed for a transient
+  # stall, now that a capable worker is back. Scoped tightly so it can
+  # only ever help, never thrash:
+  #
+  #   * status == "failed" with the reaper's own stall error (so genuine
+  #     bootstrap/config/controller-crash failures are never retried —
+  #     those would just re-fail),
+  #   * failed within @resume_window_seconds (recent transient outage,
+  #     not an old corpse),
+  #   * no live master job (nothing already running it),
+  #   * a live worker advertises the experiment's adapter (so it won't
+  #     immediately re-stall).
+  #
+  # Complements the LocalScorer pause path: that keeps a *still-running*
+  # run alive while it waits for a worker; this recovers the rarer case
+  # where the controller itself died (e.g. a deploy killed it mid-step
+  # and the self-enqueue successor was lost), leaving a `failed` row that
+  # a returning worker would otherwise never revive.
+  defp resume_resumable_experiments do
+    cutoff = DateTime.add(DateTime.utc_now(), -@resume_window_seconds, :second)
+
+    resumable =
+      from(e in Experiment,
+        where:
+          e.status == "failed" and
+            not is_nil(e.completed_at) and e.completed_at >= ^cutoff and
+            like(e.error, "no progress for%")
+      )
+      |> Repo.all()
+
+    Enum.each(resumable, fn exp ->
+      adapter = adapter_for(exp)
+
+      if not alive?(exp.id) and Server.Queue.adapter_has_live_worker?(adapter) do
+        case Experiments.resume(exp) do
+          {:ok, resumed} ->
+            Server.Workers.ExperimentController.new(%{"experiment_id" => resumed.id})
+            |> Oban.insert!()
+
+            Logger.warning(
+              "[Reaper] auto-resumed stalled experiment #{exp.id} (#{exp.env_name}); " <>
+                "#{adapter} worker available again"
+            )
+
+            Experiments.log_event!(
+              "warn",
+              "reaper",
+              "auto-resumed #{exp.env_name}: #{adapter} worker reappeared after a transient stall",
+              env_name: exp.env_name,
+              experiment_id: exp.id,
+              metadata: %{"adapter" => adapter, "resumed_from_error" => exp.error}
+            )
+
+          {:error, reason} ->
+            # Most likely the lineage already has another active run
+            # (unique constraint) — fine, just skip.
+            Logger.info("[Reaper] resume skipped for #{exp.id}: #{inspect(reason)}")
+        end
+      end
+    end)
+  end
+
+  defp adapter_for(%Experiment{config: config}) do
+    case is_map(config) && (Map.get(config, "adapter") || Map.get(config, :adapter)) do
+      a when is_binary(a) and a != "" -> a
+      _ -> "mujoco"
+    end
   end
 
   defp reap_stalled_experiments do
