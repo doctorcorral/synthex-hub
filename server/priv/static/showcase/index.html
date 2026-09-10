@@ -332,6 +332,101 @@
                 </div>
             </section>
 
+            <!-- Ant (CSHRL unfolding gate, raw reward, quadruped) -->
+            <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
+                <div>
+                    <h2 class="text-2xl font-bold text-nord14 mb-2">MuJoCo Ant-v5</h2>
+                    <div class="flex items-center gap-4 mb-4 text-xs text-nord9 flex-wrap">
+                        <span class="bg-nord2 px-2 py-1 rounded">Score: ~1640</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">State: 27D + history/clock</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Action: 8D (32 bits)</span>
+                        <span class="bg-nord2 px-2 py-1 rounded">Concept: Coinductive Unfolding Gate</span>
+                    </div>
+                </div>
+                <div class="video-container bg-black mb-4 no-expand" onclick="openModal('videos/ant.mp4', event)">
+                    <video autoplay loop muted class="w-full h-auto">
+                        <source src="videos/ant.mp4" type="video/mp4">
+                    </video>
+                </div>
+                <div class="code-section mt-auto no-expand" onclick="event.stopPropagation()">
+                    <p class="text-gray-300 text-sm mb-3">
+                        Raw reward, first quadruped: 8 torques from 32 predicate bits over a
+                        27D proprioceptive view plus history and gait clocks. Seeded with a
+                        period-12 open-loop trot found by hill-climbing, then refined by the
+                        <strong>coinductive unfolding gate</strong>: commits accepted only when the
+                        candidate's own unfolding dominated the incumbent's from shared snapshots.
+                        The gate's edits turned a fragile open-loop cycle (falls on bad starts)
+                        into a reactive gait that completed every one of 60 held-out episodes.
+                    </p>
+                    <div class="overflow-x-auto">
+                    <pre><code class="language-python">def policy(obs, prev_obs, prev_act, t):
+    # Augmented view (68D): current obs (27D) + previous obs (27D)
+    # + previous action (8D) + gait clocks sin/cos of periods 12/24/48.
+    v = list(obs) + list(prev_obs) + list(prev_act)
+    for T in (12, 24, 48):
+        v += [sin(2*pi*t/T), cos(2*pi*t/T)]
+    ricker = lambda x, b, a: (1 - ((x-b)/a)**2) * exp(-((x-b)/a)**2 / 2)
+
+    bits = [0] * 32
+
+    # hip_1
+    if ((sin(v[14]) &lt; -0.1) or (cos(v[23]) &lt; 0.9)) and (v[14] &lt; 0.1): bits[0] = 1
+    if ((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)): bits[1] = 1
+    if ((((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)): bits[2] = 1
+    if (v[1]*v[8] &lt; 0) and ((v[4]*v[20] &lt; 0.3) or (-1.066 &lt;= v[4] &lt; -0.8063)): bits[3] = 1
+
+    # ankle_1
+    if ((v[4]*v[46] &lt; 0.3) and (v[29] &lt; 0.0224)) and ((v[52]*v[55] &lt; -0.05459) or (5*v[4] + v[57] &lt; 0)): bits[4] = 1
+    if (((((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)): bits[5] = 1
+    if ((0.3331 &lt;= v[15] &lt; 0.8034) or (-3*v[41] + v[21] &lt; 0)) and ((0.4803 &lt;= v[27] &lt; 0.5322) or (1*v[15] + -1*v[2] + v[13] &lt; 0)): bits[6] = 1
+    if not ((((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933)) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))): bits[7] = 1
+
+    # hip_2
+    if ((ricker(v[26], -2.866, 1.354) &lt; 0.4) or (v[18]*v[22] &lt; -0.4452)) and (sin(v[52]) &lt; 0.9): bits[8] = 1
+    if (0.4827 &lt;= v[0] &lt; 0.5269) and ((-2*v[57]**2 + v[2] &lt; 0) or (-0.556 &lt;= v[5] &lt; -0.5013)): bits[9] = 1
+    if (cos(v[25]) &lt; 0.1) or (0.5398 &lt;= v[27] &lt; 0.5527): bits[10] = 1
+    if ((((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)): bits[11] = 1
+
+    # ankle_2
+    if ((sin(v[11]) &lt; 0.9) and (-1*v[23] + 1*v[1] + v[13] &lt; 0)) or ((-2*v[20] + -1*v[26] + v[22] &lt; 0) and (-1*v[59] + v[8] &lt; 0)): bits[12] = 1
+    if (sin(v[66]) &lt; 0) or (-2*v[15] + 1*v[9] + v[12] &lt; 0): bits[13] = 1
+    if (((((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25)): bits[14] = 1
+    if not (((((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)) or ((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))): bits[15] = 1
+
+    # hip_3
+    if not ((((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683)) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683))): bits[16] = 1
+    if (((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683))) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)): bits[17] = 1
+    if (((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25)): bits[18] = 1
+    if ((((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683)) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683)): bits[19] = 1
+
+    # ankle_3
+    if ((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25)): bits[20] = 1
+    if ((((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; 0.933)) and not (v[63] &lt; 0.683)): bits[21] = 1
+    if (((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)): bits[22] = 1
+    if not ((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))): bits[23] = 1
+
+    # hip_4
+    if ((cos(v[9]) &lt; 0.7) or (v[51]*v[65] &lt; -0.3)) or (0.7948 &lt;= v[45] &lt; 1.549): bits[24] = 1
+    if (1*v[23] + 1*v[13] + v[15] &lt; 0) and (-0.5244 &lt;= v[37] &lt; -0.521): bits[25] = 1
+    if (0.5398 &lt;= v[27] &lt; 0.5527) or (sin(v[43]) &lt; -0.9): bits[26] = 1
+    if v[17]*v[41] &lt; 0.1801: bits[27] = 1
+
+    # ankle_4
+    if (((((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)) or ((not (v[62] &lt; 0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)): bits[28] = 1
+    if ((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683))) or ((((v[62] &lt; 0.683) and not (v[62] &lt; 0.25)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25)): bits[29] = 1
+    if not (((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; -0.25)) and not (v[63] &lt; -0.683)) or (((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and (v[63] &lt; -0.933))): bits[30] = 1
+    if not (((((((v[62] &lt; 0.25) and not (v[62] &lt; -0.25)) and not (v[63] &lt; 0.933)) or ((((v[62] &lt; 0.933) and not (v[62] &lt; 0.683)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))) or ((((v[62] &lt; -0.25) and not (v[62] &lt; -0.683)) and (v[63] &lt; -0.683)) and not (v[63] &lt; -0.933))) or (((v[62] &lt; -0.933) and (v[63] &lt; 0.25)) and not (v[63] &lt; -0.25))) or ((((v[62] &lt; -0.683) and not (v[62] &lt; -0.933)) and (v[63] &lt; 0.683)) and not (v[63] &lt; 0.25))): bits[31] = 1
+
+    weights = [1, 2, 4, 8]
+    actions = [0.0] * 8
+    for d in range(8):
+        s = sum(weights[i] * bits[d*4+i] for i in range(4))
+        actions[d] = -0.5 + 1.0 * s / 15
+    return actions</code></pre>
+                    </div>
+                </div>
+            </section>
+
             <!-- Swimmer -->
             <section class="card rounded-xl p-6 flex flex-col" onclick="toggleExpand(this)">
                 <div>
